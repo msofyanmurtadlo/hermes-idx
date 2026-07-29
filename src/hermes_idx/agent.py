@@ -24,8 +24,26 @@ from dataclasses import dataclass
 from pathlib import Path
 
 SKILL_NAME = "idx-screener"
-SKILL_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")) / "skills" / SKILL_NAME
+SKILL_CATEGORY = "trading"
+HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def skill_home() -> Path:
+    """Lokasi pemasangan skill.
+
+    Hermes menata skill per kategori (`skills/trading/`, `skills/devops/`, ...). Kalau
+    direktori kategori itu ada, ikuti konvensinya; kalau tidak, pasang datar di
+    `skills/<nama>`. Jangan memaksakan satu layout — instalasi Hermes berbeda-beda.
+    """
+    skills = HERMES_HOME / "skills"
+    if (skills / SKILL_CATEGORY).is_dir():
+        return skills / SKILL_CATEGORY / SKILL_NAME
+    return skills / SKILL_NAME
+
+
+# Kompatibilitas: sebagian kode & test memakai konstanta ini.
+SKILL_HOME = skill_home()
 
 DISCLAIMER = (
     "Alat bantu analisis teknikal, bukan nasihat investasi. "
