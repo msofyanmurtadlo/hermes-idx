@@ -4,9 +4,35 @@
 close, keluarkan sinyal yang lengkap dengan stop loss, take profit, dan position size —
 plus backtest walk-forward yang bisa Anda audit sendiri.
 
-> ⚠️ **STATUS: SPESIFIKASI. Belum ada kode.**
-> Repo ini saat ini berisi PRD dan review kritisnya. Dipublikasikan lebih awal supaya
-> keputusan desainnya bisa dikoreksi orang lain **sebelum** ditulis jadi kode, bukan sesudah.
+> ⚠️ **STATUS: v0.1 — inti sudah jalan, belum siap dipakai untuk uang sungguhan.**
+> Pipeline lengkap sudah berfungsi end-to-end: ambil data → indikator → 4 strategi →
+> sinyal ber-SL/TP/sizing → backtest → portofolio → CLI → jembatan Hermes agent.
+> Yang **belum** ada: daftar emiten IDX otomatis (masih perlu seed CSV), penyesuaian
+> corporate action, modul screenshot, dan notifikasi. Aturan bursa historis (fraksi harga
+> & batas auto rejection sebelum 2023) belum diverifikasi — lihat [issues](../../issues).
+
+## Coba
+
+```bash
+git clone https://github.com/msofyanmurtadlo/hermes-idx.git && cd hermes-idx
+python3 -m venv .venv && .venv/bin/pip install -e .
+.venv/bin/hermes-idx init
+.venv/bin/hermes-idx data update --tickers BBCA,BBRI,TLKM,ANTM,ADRO
+.venv/bin/hermes-idx backtest --strategy breakout
+.venv/bin/hermes-idx scan
+```
+
+Sambungkan ke Hermes agent:
+
+```bash
+hermes-idx agent install    # tautkan skill/ ke ~/.hermes/skills/idx-screener
+hermes-idx agent verify     # uji koneksi: PATH, skill, dan kontrak JSON
+hermes-idx doctor           # diagnostik lengkap
+```
+
+Agent memanggil CLI dengan `--json` dan membaca satu objek JSON per perintah. Kontrak dan
+aturan perilakunya ada di [`skill/SKILL.md`](skill/SKILL.md); manifest kemampuan yang
+dibaca agent: `hermes-idx agent info --json`.
 
 ---
 
@@ -60,6 +86,17 @@ lebih berdampak ke profitabilitas daripada perbaikan strategi apa pun.
 |---|---|
 | [`docs/PRD.md`](docs/PRD.md) | Spesifikasi lengkap: arsitektur, 4 strategi bawaan, model data, metodologi backtest, CLI, integrasi Termux |
 | [`docs/REVIEW-01.md`](docs/REVIEW-01.md) | Review kritis PRD — 5 blocker, 8 temuan serius, 12 menengah. **Baca ini kalau mau berkontribusi.** |
+| [`skill/SKILL.md`](skill/SKILL.md) | Kontrak & aturan perilaku untuk Hermes agent |
+
+## Rencana stack → yang benar-benar dipakai
+
+Python 3.11+ · pandas · numpy · SQLite · httpx · typer + rich · backtest engine sendiri.
+
+Indikator **ditulis dengan pandas murni**, menyimpang dari PRD yang menyebut `pandas-ta`:
+TA-Lib butuh kompilasi C yang rapuh di Termux, dan `pandas-ta` rusak pada numpy >= 2.0
+(memakai `numpy.NaN` yang sudah dihapus). Semua indikator di sini one-liner sampai
+belasan baris, jadi menulis sendiri lebih murah daripada menanggung dependensi rapuh di
+platform target.
 
 ---
 
@@ -96,12 +133,6 @@ Diskusi dalam Bahasa Indonesia atau Inggris sama-sama diterima.
 - Tidak menjanjikan angka win rate kepada pengguna.
 
 ---
-
-## Rencana stack
-
-Python 3.11+ · pandas · numpy · `pandas-ta` (pure Python, bukan TA-Lib) · SQLite · `httpx` ·
-`typer` + `rich` · backtest engine vectorized sendiri (backtrader/vectorbt terlalu berat
-untuk Termux).
 
 ---
 
