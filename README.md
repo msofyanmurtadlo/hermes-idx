@@ -121,6 +121,7 @@ lebih berdampak ke profitabilitas daripada perbaikan strategi apa pun.
 |---|---|
 | [`docs/PRD.md`](docs/PRD.md) | Spesifikasi lengkap: arsitektur, 4 strategi bawaan, model data, metodologi backtest, CLI, integrasi Termux |
 | [`docs/REVIEW-01.md`](docs/REVIEW-01.md) | Review kritis PRD — 5 blocker, 8 temuan serius, 12 menengah. **Baca ini kalau mau berkontribusi.** |
+| [`docs/TERMUX.md`](docs/TERMUX.md) | Pasang di Android, migrasi dari script v3, dan cara membereskan scheduling yang mati |
 | [`docs/BUKTI-01.md`](docs/BUKTI-01.md) | **Hasil adu strategi + bug yang ditemukan di script v3.** Angka mentah, bisa direproduksi |
 | [`skill/SKILL.md`](skill/SKILL.md) | Kontrak & aturan perilaku untuk Hermes agent |
 
