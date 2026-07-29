@@ -1,0 +1,15 @@
+intent: portofolio
+description: Lihat posisi terbuka dan rekomendasi jual.
+utterances:
+  - cek portofolio saya
+  - posisi mana yang harus dijual
+  - gimana performa trading saya bulan ini
+commands:
+  show: hermes-idx port show --json
+  review: hermes-idx port review --json
+  stats: hermes-idx port stats --json
+  add: hermes-idx port add {ticker} --lot {lot} --price {price} --json
+  sell: hermes-idx port sell {ticker} --lot {lot} --price {price} --json
+notes: |
+  Posisi dengan no_stop_loss=true harus ditandai jelas ke user dan ditawari mengisi SL
+  lewat `port plan`. Field `coverage` di stats wajib disampaikan apa adanya.

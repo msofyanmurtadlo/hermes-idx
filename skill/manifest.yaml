@@ -1,0 +1,17 @@
+name: idx-screener
+version: 0.1.0
+description: Screener saham IDX dengan sinyal ber-SL/TP, backtest, dan portfolio tracker.
+cli: hermes-idx
+entrypoint: SKILL.md
+output_contract: |
+  Setiap perintah dengan --json menulis satu objek JSON ke stdout.
+  Field `ok` (bool) menandai sukses; `error` berisi pesan bila gagal.
+requires:
+  python: ">=3.11"
+  packages: [pandas, numpy, typer, rich, httpx, pyyaml]
+  optional: [termux-api]
+verify: hermes-idx agent verify --json
+non_goals:
+  - Tidak mengeksekusi order. Bukan bot auto-trading.
+  - Tidak mengakses API internal Stockbit dalam bentuk apa pun.
+  - Tidak menjanjikan angka win rate kepada pengguna.

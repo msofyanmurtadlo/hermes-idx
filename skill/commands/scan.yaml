@@ -1,0 +1,14 @@
+intent: screening
+description: Cari saham yang memenuhi setup beli hari ini.
+utterances:
+  - saham apa yang bagus dibeli hari ini
+  - ada sinyal beli hari ini
+  - screening dong
+  - cari saham breakout
+command: hermes-idx scan --json
+options:
+  min_score: "--min-score {value}"
+  top: "--top {value}"
+  strategy: "--strategy {value}"
+returns: signals[] berisi entry_price, stop_loss, tp1, tp2, position_lot, risk_rp, score, notes
+must_include_in_reply: [entry_price, stop_loss, tp1, tp2, disclaimer]

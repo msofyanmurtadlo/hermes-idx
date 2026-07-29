@@ -1,0 +1,12 @@
+intent: backtest
+description: Uji strategi terhadap data historis.
+utterances:
+  - backtest strategi breakout
+  - strategi mana yang paling bagus
+command: hermes-idx backtest --strategy {strategy} --json
+returns: metrics (expectancy, profit_factor, win_rate, max_dd, unfilled_ara) + p_value + folds
+notes: |
+  Metode yang dipakai adalah rolling out-of-sample, BUKAN walk-forward — tidak ada parameter
+  yang di-fit. Jangan menyebutnya walk-forward saat menjelaskan ke user.
+  Bila p_value > 0.05, katakan hasilnya belum signifikan secara statistik.
+  Field unfilled_ara = jumlah sinyal yang tidak bisa dieksekusi karena auto rejection atas.
