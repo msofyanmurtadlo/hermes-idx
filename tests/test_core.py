@@ -489,3 +489,20 @@ def test_v3_stop_uses_atr_not_fixed_two_percent(ohlc):
         entry = float(frame["close"].iloc[i])
         widths.append((entry - s.levels(frame, i, entry).stop_loss) / entry * 100)
     assert max(widths) > 2.05, "stop masih terpaku 2% — bug v3 kembali"
+
+
+def test_daily_warns_when_positions_exceed_limit(conn, cfg):
+    from hermes_idx import daily
+    cfg.data["akun"]["max_open_positions"] = 2
+    for t, p in [("BBCA", 9000), ("BBRI", 4000), ("TLKM", 3000)]:
+        portfolio.record(conn, t, dt.date(2026, 7, 1), "BUY", 1, p, cfg.fees)
+    report = daily.build(conn, cfg)
+    assert any("melebihi batas" in w for w in report["peringatan"])
+
+
+def test_untracked_position_marked_in_report(conn, cfg):
+    """Posisi tanpa data harga harus terlihat jelas — bukan hilang diam-diam."""
+    from hermes_idx import daily
+    portfolio.record(conn, "WIDI", dt.date(2026, 7, 1), "BUY", 1, 110, cfg.fees)
+    text = daily.render_text(daily.build(conn, cfg))
+    assert "TIDAK TERPANTAU" in text

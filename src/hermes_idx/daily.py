@@ -105,6 +105,13 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
             })
 
     report["aksi"].sort(key=lambda a: URGENCY_ORDER.get(a["urgensi"], 9))
+    max_open = int(cfg.data["akun"]["max_open_positions"])
+    if len(positions) > max_open:
+        report["peringatan"].append(
+            f"Posisi terbuka {len(positions)} melebihi batas {max_open}. Tidak akan ada "
+            f"sinyal beli baru sampai jumlahnya turun — kurangi dulu, atau naikkan "
+            f"`akun.max_open_positions` kalau memang disengaja."
+        )
     report["ringkasan_porto"] = {
         "jumlah_posisi": len(positions),
         "maks_posisi": cfg.data["akun"]["max_open_positions"],
@@ -175,6 +182,7 @@ def render_text(report: dict) -> str:
         for pos in report["posisi"]:
             if pos.get("error"):
                 flag = " ⚠️TANPA SL" if pos.get("tanpa_sl") else ""
+                flag += " ⚠️TIDAK TERPANTAU"
                 lines.append(f"{pos['ticker']}: {pos['lot']} lot, avg "
                              f"{pos['avg_price']:,.0f} — {pos['error']}{flag}")
                 continue

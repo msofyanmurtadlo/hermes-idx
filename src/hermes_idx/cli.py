@@ -107,7 +107,12 @@ def data_update(full: bool = typer.Option(False, "--full", help="Full refresh, b
         symbols = [r["ticker"] for r in rows]
         if not symbols:
             _fail("Daftar emiten kosong. Isi dulu dengan `hermes-idx data seed`.", as_json)
-    symbols = [cfg.data["data"]["benchmark"], *symbols]
+
+    # Emiten yang SEDANG DIPEGANG wajib ikut, walau di luar universe. Tanpa ini posisi
+    # non-bluechip tidak punya data harga sama sekali — tidak bisa dinilai SL/TP-nya dan
+    # hilang dari review harian. Posisi tak terpantau lebih berbahaya daripada posisi rugi.
+    held = [r["ticker"] for r in conn.execute("SELECT ticker FROM posisi WHERE lot > 0")]
+    symbols = list(dict.fromkeys([cfg.data["data"]["benchmark"], *symbols, *held]))
 
     results = datamod.update(conn, symbols, source, cfg.data["data"]["history_years"], full)
     failed = [t for t, n in results.items() if n < 0]

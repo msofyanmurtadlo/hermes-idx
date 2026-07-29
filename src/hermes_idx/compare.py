@@ -68,7 +68,10 @@ def run(conn, cfg, names: list[str] | None = None) -> list[Entry]:
     entries: list[Entry] = []
 
     for strategy in candidates:
-        result = screen.run_backtest(conn, cfg, strategy.name, persist=False)
+        # persist=True: `compare` adalah lari-bukti kanonik. Kalau hasilnya tidak
+        # disimpan, `daily` dan skor sinyal tidak pernah tahu strategi mana yang punya
+        # edge — persis yang terjadi saat dicoba di perangkat sungguhan.
+        result = screen.run_backtest(conn, cfg, strategy.name, persist=True)
         metrics = result.metrics(cfg.risk_pct)
         folds = bt.fold_consistency(result.trades)
         entries.append(Entry(
