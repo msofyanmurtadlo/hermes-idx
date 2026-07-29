@@ -2,7 +2,7 @@
 
 **Screener saham IDX berbasis CLI yang jalan di HP.** Screening ~900 emiten setelah market
 close, keluarkan sinyal yang lengkap dengan stop loss, take profit, dan position size —
-plus backtest walk-forward yang bisa Anda audit sendiri.
+plus backtest out-of-sample yang bisa Anda audit sendiri.
 
 > ⚠️ **STATUS: v0.1 — inti sudah jalan, belum siap dipakai untuk uang sungguhan.**
 > Pipeline lengkap sudah berfungsi end-to-end: ambil data → indikator → 4 strategi →
@@ -106,14 +106,17 @@ Repo ini butuh orang yang paham **mikrostruktur pasar IDX**, bukan cuma Python.
 
 Yang paling dibutuhkan sekarang — semua ada di [Issues](../../issues):
 
-- **Auto Rejection (ARA/ARB)** belum dimodelkan sama sekali. Ini bias struktural terbesar di
-  backtest IDX dan langsung memukul strategi breakout/momentum yang jadi andalan PRD.
-- **Metodologi walk-forward** saat ini tidak melatih apa pun — perlu diputuskan apakah jadi
-  rolling OOS biasa, atau ada yang benar-benar di-fit.
-- **Sumber data nilai transaksi harian (Rp).** Yahoo Finance hanya memberi volume lembar,
-  padahal filter likuiditas seluruh sistem bertumpu pada nilai rupiah.
-- **Fraksi harga & aturan ARA/ARB per rezim tanggal** — dibutuhkan agar backtest historis
-  tidak memakai aturan hari ini untuk periode lampau.
+- **Aturan bursa historis** (#1, #6). Mekanismenya sudah ada — fraksi harga dan batas auto
+  rejection disimpan ber-`effective_from`, dan backtest sudah membuang sinyal yang open
+  T+1-nya kena ARA. Yang belum ada: **isi tabel rezim sebelum 2023**, termasuk periode ARB
+  asimetris. Tanpa itu backtest periode lama memakai aturan hari ini. Ini riset peraturan,
+  bukan coding — cocok untuk kontributor pertama.
+- **Sumber nilai transaksi harian (Rp)** (#4). Yahoo hanya memberi volume lembar; sekarang
+  `value` diestimasi `volume × close` dan ditandai ke user. Filter likuiditas seluruh sistem
+  bertumpu pada angka estimasi ini.
+- **Daftar emiten IDX otomatis.** Sekarang masih perlu `data seed` dari CSV manual.
+- **Penyesuaian corporate action.** Split/dividen belum ditangani — gap harganya bisa
+  memicu sinyal palsu.
 
 Cara paling berguna untuk mulai:
 
@@ -131,8 +134,6 @@ Diskusi dalam Bahasa Indonesia atau Inggris sama-sama diterima.
 - Tidak akan mereverse-engineer API internal Stockbit — melanggar ToS dan berisiko akun
   pengguna disuspend. Integrasi portofolio lewat screenshot, CSV, atau input manual.
 - Tidak menjanjikan angka win rate kepada pengguna.
-
----
 
 ---
 
