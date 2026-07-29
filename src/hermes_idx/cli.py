@@ -309,6 +309,49 @@ def _num(value):
     return None if value is None or (isinstance(value, float) and math.isnan(value)) else float(value)
 
 
+@app.command("compare")
+def compare_cmd(strategy: Optional[str] = typer.Option(None, "--strategy",
+                                                       help="Dipisah koma. Default: semua."),
+                home: Optional[Path] = HOME_OPT, as_json: bool = JSON_OPT):
+    """Adu semua strategi pada universe, periode, dan biaya yang sama."""
+    from . import compare as cmp
+
+    cfg, conn = _ctx(home)
+    names = [s.strip() for s in strategy.split(",")] if strategy else None
+    try:
+        entries = cmp.run(conn, cfg, names)
+    except KeyError as exc:
+        _fail(str(exc), as_json)
+        return
+    winner, explanation = cmp.recommendation(entries)
+
+    agent.emit({"ok": True, "winner": winner, "explanation": explanation,
+                "ranking": [e.as_dict() for e in entries],
+                "disclaimer": agent.DISCLAIMER}, as_json)
+    if as_json:
+        return
+
+    table = Table(title="Adu strategi — peringkat pakai expectancy, BUKAN win rate")
+    for col in ("STRATEGI", "TRADE", "WIN%", "EXPECT", "PF", "MAX DD", "p", "SKOR", "VONIS"):
+        table.add_column(col, justify="left" if col in ("STRATEGI", "VONIS") else "right")
+    for e in entries:
+        m = e.metrics
+        if not m.get("total_trades"):
+            table.add_row(e.strategy, "0", "—", "—", "—", "—", "—", "—", e.verdict)
+            continue
+        table.add_row(
+            e.strategy, str(m["total_trades"]), f"{m['win_rate']:.0f}",
+            f"{m['expectancy']:+.3f}", str(m["profit_factor"]), f"{m['max_dd']:.1f}%",
+            str(e.p_value), f"{e.composite:.2f}", e.verdict,
+        )
+    console.print(table)
+    console.print(f"\n[bold]{explanation}[/bold]")
+    console.print("[dim]Win rate ditampilkan sebagai informasi, bukan dasar peringkat: "
+                  "win rate tinggi mudah dibuat dengan TP dekat + SL lebar, dan itu "
+                  "justru merugi setelah biaya.[/dim]")
+    _disclaimer()
+
+
 @app.command()
 def backtest(strategy: str = typer.Option(..., "--strategy"),
              home: Optional[Path] = HOME_OPT, as_json: bool = JSON_OPT):

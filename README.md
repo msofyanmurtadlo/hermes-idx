@@ -4,22 +4,27 @@
 close, keluarkan sinyal yang lengkap dengan stop loss, take profit, dan position size —
 plus backtest out-of-sample yang bisa Anda audit sendiri.
 
-> ⚠️ **STATUS: v0.1 — inti sudah jalan, belum siap dipakai untuk uang sungguhan.**
-> Pipeline lengkap sudah berfungsi end-to-end: ambil data → indikator → 4 strategi →
-> sinyal ber-SL/TP/sizing → backtest → portofolio → CLI → jembatan Hermes agent.
-> Yang **belum** ada: daftar emiten IDX otomatis (masih perlu seed CSV), penyesuaian
-> corporate action, modul screenshot, dan notifikasi. Aturan bursa historis (fraksi harga
-> & batas auto rejection sebelum 2023) belum diverifikasi — lihat [issues](../../issues).
+> ⚠️ **STATUS: v0.2 — jalan penuh, tapi belum ada strategi yang terbukti untung.**
+> Pipeline lengkap berfungsi end-to-end. Yang belum terbukti adalah **edge**-nya: pada
+> data uji (51 bluechip IDX, 2021–2026) **tidak ada satu pun strategi dengan expectancy
+> positif setelah biaya**. Angka lengkapnya di [`docs/BUKTI-01.md`](docs/BUKTI-01.md).
+> Repo ini tidak akan mengklaim akurat sebelum `compare` membuktikannya.
 
-## Coba
+## Pasang
 
 ```bash
-git clone https://github.com/msofyanmurtadlo/hermes-idx.git && cd hermes-idx
-python3 -m venv .venv && .venv/bin/pip install -e .
-.venv/bin/hermes-idx init
-.venv/bin/hermes-idx data update --tickers BBCA,BBRI,TLKM,ANTM,ADRO
-.venv/bin/hermes-idx backtest --strategy breakout
-.venv/bin/hermes-idx scan
+git clone https://github.com/msofyanmurtadlo/hermes-idx.git
+cd hermes-idx && bash install.sh
+```
+
+Installer mendeteksi Termux vs Linux, memakai `python-numpy`/`python-pandas` dari `pkg`
+di Android (bukan kompilasi pip), mengisi universe bluechip, dan memasang skill Hermes
+kalau `~/.hermes` ada.
+
+```bash
+hermes-idx data update      # ambil OHLCV (10–30 menit pertama kali)
+hermes-idx compare          # adu strategi — LAKUKAN INI DULU
+hermes-idx scan             # sinyal hari ini
 ```
 
 Sambungkan ke Hermes agent:
@@ -56,6 +61,36 @@ Proyek ini tidak menjanjikan win rate tertentu, dan tidak akan pernah dipasarkan
 
 ---
 
+## Jujur soal akurasi
+
+Repo ini **tidak menjanjikan akurasi tertentu**, dan tidak akan pernah. Bukan karena
+merendah — karena begitu sebuah alat mengklaim "akurat", ia berhenti mengukur dirinya.
+
+Yang diberikan sebagai gantinya adalah `hermes-idx compare`: adu semua strategi pada
+universe, periode, dan biaya yang sama, lalu vonis apa adanya.
+
+```
+strategi         trade  win%   expect    PF    maxDD  vonis
+mean_reversion     282    58   -0.082  0.79   -22.5%  EXPECTANCY NEGATIF
+v3score            755    39   -0.143  0.71   -72.6%  EXPECTANCY NEGATIF
+breakout           176    22   -0.213  0.73   -38.7%  EXPECTANCY NEGATIF
+momentum_rs        380    28   -0.311  0.46   -69.9%  EXPECTANCY NEGATIF
+pullback           735    20   -0.377  0.47   -94.0%  EXPECTANCY NEGATIF
+
+Tidak ada strategi yang lolos ambang minimum. Jangan pakai sinyal apa pun
+dari sini untuk uang sungguhan sampai ada yang lolos.
+```
+
+Kenapa semua negatif? **IHSG hanya naik 1,4% dalam 5,1 tahun** pada periode uji. Pasar
+datar + biaya transaksi 0,40% round-trip = strategi long-only yang sering bertransaksi
+pasti kalah. Itu aritmetika, bukan kegagalan kode — beli-dan-tahan pun cuma median +1,8%.
+
+Perhatikan `mean_reversion`: win rate 58%, tertinggi, tapi tetap rugi. Itu tepat kenapa
+sistem ini memeringkat dengan expectancy, bukan win rate.
+
+**Alat yang jujur bilang "belum ada edge" lebih berguna daripada alat yang mengklaim 90%
+akurat.** Yang pertama menyelamatkan modal Anda; yang kedua menghabiskannya.
+
 ## Yang bikin beda
 
 **Mengoptimasi expectancy, bukan win rate.** Win rate tinggi gampang dipalsukan: pasang TP
@@ -86,6 +121,7 @@ lebih berdampak ke profitabilitas daripada perbaikan strategi apa pun.
 |---|---|
 | [`docs/PRD.md`](docs/PRD.md) | Spesifikasi lengkap: arsitektur, 4 strategi bawaan, model data, metodologi backtest, CLI, integrasi Termux |
 | [`docs/REVIEW-01.md`](docs/REVIEW-01.md) | Review kritis PRD — 5 blocker, 8 temuan serius, 12 menengah. **Baca ini kalau mau berkontribusi.** |
+| [`docs/BUKTI-01.md`](docs/BUKTI-01.md) | **Hasil adu strategi + bug yang ditemukan di script v3.** Angka mentah, bisa direproduksi |
 | [`skill/SKILL.md`](skill/SKILL.md) | Kontrak & aturan perilaku untuk Hermes agent |
 
 ## Rencana stack → yang benar-benar dipakai
