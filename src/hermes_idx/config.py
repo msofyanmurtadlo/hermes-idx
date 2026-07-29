@@ -23,7 +23,8 @@ DEFAULTS: dict[str, Any] = {
         "modal": 50000000,
         "risk_per_trade_pct": 1.0,
         "max_position_pct": 20.0,
-        "max_open_positions": 8,
+        "max_open_positions": 4,
+        "max_per_sector": 2,
         "max_sector_exposure_pct": 40.0,
     },
     "biaya": {

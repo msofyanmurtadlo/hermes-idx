@@ -45,11 +45,15 @@ class MarketContext:
     benchmark_close: pd.Series | None = None
     bullish_regime: pd.Series | None = None
     """Series bool per tanggal: True bila IHSG di atas MA200 (SE-2)."""
+    available: bool = True
+    """False bila data IHSG tidak ada. Rezim di-anggap TIDAK bullish (fail-closed)."""
 
 
 def build_context(benchmark: pd.DataFrame | None) -> MarketContext:
     if benchmark is None or benchmark.empty:
-        return MarketContext()
+        # Fail-closed, mengikuti script v3: kalau IHSG tidak bisa dicek, tahan BELI.
+        # Menganggap pasar bullish saat datanya hilang adalah arah kegagalan yang salah.
+        return MarketContext(available=False)
     close = benchmark["close"]
     above = close > ind.sma(close, 200)
     # SE-2: rezim dinyatakan bearish bila IHSG di bawah MA200 selama > 10 hari beruntun.
@@ -72,9 +76,9 @@ def _common(df: pd.DataFrame, ctx: MarketContext) -> pd.DataFrame:
     else:
         out["rs"] = np.nan
     if ctx.bullish_regime is not None:
-        out["bullish"] = ctx.bullish_regime.reindex(out.index).ffill().fillna(True)
+        out["bullish"] = ctx.bullish_regime.reindex(out.index).ffill().fillna(False)
     else:
-        out["bullish"] = True
+        out["bullish"] = bool(ctx.available)
     return out
 
 

@@ -11,7 +11,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from . import agent, config as cfgmod, data as datamod, db, portfolio, screen, strategies as strat
+from . import (agent, config as cfgmod, data as datamod, db, legacy, portfolio,
+               screen, strategies as strat, universe)
 
 app = typer.Typer(add_completion=False, help="Screener saham IDX untuk Termux.")
 data_app = typer.Typer(help="Kelola data OHLCV.")
@@ -116,6 +117,55 @@ def data_update(full: bool = typer.Option(False, "--full", help="Full refresh, b
     if not as_json:
         console.print(f"[green]{payload['bars']} bar[/green] dari {len(results)} ticker."
                       + (f" [red]{len(failed)} gagal.[/red]" if failed else ""))
+
+
+@data_app.command("seed-bluechip")
+def data_seed_bluechip(home: Optional[Path] = HOME_OPT, as_json: bool = JSON_OPT):
+    """Isi daftar emiten dari universe bluechip kurasi (dari script v3)."""
+    _, conn = _ctx(home)
+    count = universe.seed(conn)
+    agent.emit({"ok": True, "emiten": count}, as_json)
+    if not as_json:
+        console.print(f"[green]{count} emiten bluechip[/green] tercatat. "
+                      f"Lanjut: `hermes-idx data update`.")
+
+
+@port_app.command("import-legacy")
+def port_import_legacy(
+    scripts_dir: Optional[Path] = typer.Option(None, "--from",
+                                               help="Default ~/.hermes/scripts"),
+    home: Optional[Path] = HOME_OPT, as_json: bool = JSON_OPT):
+    """Impor portfolio.json & riwayat sinyal dari script Hermes v3."""
+    cfg, conn = _ctx(home)
+    paths = legacy.legacy_paths(scripts_dir)
+    payload: dict = {"ok": True, "imported": 0, "notes": [], "legacy_stats": None}
+
+    if paths["portfolio"].exists():
+        count, notes = legacy.import_portfolio(conn, paths["portfolio"], cfg.fees)
+        payload["imported"] = count
+        payload["notes"] = notes
+    else:
+        payload["notes"].append(f"tidak ditemukan: {paths['portfolio']}")
+
+    if paths["signal_history"].exists():
+        payload["legacy_stats"] = legacy.import_signal_history(conn, paths["signal_history"])
+
+    agent.emit(payload, as_json)
+    if as_json:
+        return
+    console.print(f"[green]{payload['imported']} posisi[/green] diimpor.")
+    for note in payload["notes"]:
+        console.print(f"[yellow]⚠ {note}[/yellow]")
+    if payload["legacy_stats"]:
+        console.print("\n[dim]Akurasi versi lama (disimpan sebagai catatan, BUKAN dilebur "
+                      "ke statistik):[/dim]")
+        for action, node in payload["legacy_stats"].items():
+            if node["total"]:
+                console.print(f"  {action}: {node['benar']}/{node['total']} "
+                              f"({node['akurasi_pct']}%)")
+        console.print("[dim]Diukur sebagai arah harga keesokan hari — tidak "
+                      "memperhitungkan SL kena maupun biaya. Lebih optimis dari "
+                      "expectancy sungguhan.[/dim]")
 
 
 @data_app.command("seed")

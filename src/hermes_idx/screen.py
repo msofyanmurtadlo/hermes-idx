@@ -6,7 +6,7 @@ import datetime as dt
 
 import pandas as pd
 
-from . import backtest, data, signals, strategies as strat
+from . import backtest, data, signals, strategies as strat, universe
 
 
 def load_panel(conn, tickers: list[str], strategy, ctx, min_bars: int = 250
@@ -53,6 +53,11 @@ def scan(conn, cfg, strategy_names: list[str] | None = None, min_score: float | 
         warnings.append(f"Data terakhir berumur {age} hari (> {stale}). Sinyal mungkin basi.")
 
     ctx = context(conn, cfg)
+    if not ctx.available:
+        warnings.append(
+            "Data IHSG tidak tersedia — rezim pasar tidak bisa dinilai. Semua sinyal BELI "
+            "ditahan (fail-closed). Jalankan `data update` untuk mengambil ^JKSE."
+        )
     known_edges = edges(conn)
     min_score = cfg.data["screening"]["min_score"] if min_score is None else min_score
     avg_values = _avg_values(conn)
@@ -79,7 +84,48 @@ def scan(conn, cfg, strategy_names: list[str] | None = None, min_score: float | 
                 found.append(signal)
 
     found.sort(key=lambda s: s.score, reverse=True)
+    found = _apply_concentration(conn, cfg, found, warnings)
     return (found[:top] if top else found), warnings
+
+
+def _apply_concentration(conn, cfg, found, warnings):
+    """Batas jumlah posisi & per sektor — diambil dari aturan script v3.
+
+    Config `max_open_positions` dan `max_per_sector` sebelumnya ada tapi tidak pernah
+    ditegakkan di mana pun. Sinyal yang terpotong tidak dibuang diam-diam: alasannya
+    ditulis ke `skip_reason` supaya tetap terlihat user.
+    """
+    max_open = int(cfg.data["akun"]["max_open_positions"])
+    max_sector = int(cfg.data["akun"].get("max_per_sector", 2))
+
+    held = conn.execute("SELECT ticker FROM posisi WHERE lot > 0").fetchall()
+    held_tickers = {r["ticker"] for r in held}
+    sector_count: dict[str, int] = {}
+    for ticker in held_tickers:
+        sector = universe.sector_of(ticker)
+        sector_count[sector] = sector_count.get(sector, 0) + 1
+
+    slots = max_open - len(held_tickers)
+    if slots <= 0 and found:
+        warnings.append(f"Posisi terbuka sudah {len(held_tickers)}/{max_open} — "
+                        f"semua sinyal baru ditahan.")
+
+    kept = []
+    for sig in found:
+        if sig.ticker in held_tickers:
+            sig.skip_reason = "sudah dipegang"
+            continue
+        sector = universe.sector_of(sig.ticker)
+        if slots <= 0:
+            sig.skip_reason = f"slot penuh ({max_open}/{max_open})"
+            continue
+        if sector_count.get(sector, 0) >= max_sector:
+            sig.skip_reason = f"sektor {sector} sudah {sector_count[sector]}/{max_sector}"
+            continue
+        kept.append(sig)
+        slots -= 1
+        sector_count[sector] = sector_count.get(sector, 0) + 1
+    return kept
 
 
 def _avg_values(conn) -> dict[str, float]:

@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from hermes_idx import (
-    agent, backtest, config as cfgmod, db, indicators as ind, market,
-    portfolio, signals, strategies as strat,
+    agent, backtest, config as cfgmod, db, indicators as ind, legacy, market,
+    portfolio, signals, strategies as strat, universe,
 )
 
 TODAY = dt.date(2026, 7, 29)
@@ -379,3 +380,71 @@ def test_install_refuses_overwrite_without_force(tmp_path):
     with pytest.raises(FileExistsError):
         agent.install(target)
     assert agent.install(target, force=True).exists()
+
+
+# --------------------------------------------------------------------------- merge v3
+
+def test_universe_seed_is_idempotent(conn):
+    first = universe.seed(conn)
+    second = universe.seed(conn)
+    assert first == second
+    n = conn.execute("SELECT COUNT(*) c FROM emiten").fetchone()["c"]
+    assert n == first
+
+
+def test_sector_lookup():
+    assert universe.sector_of("BBCA") == "bank"
+    assert universe.sector_of("XXXX") == "lain"
+
+
+def test_session_note_windows():
+    assert universe.session_note(9 * 60 + 5)[0] == "RAWAN"     # 09:05 pembukaan
+    assert universe.session_note(10 * 60)[0] == "IDEAL"        # 10:00
+    assert universe.session_note(15 * 60 + 45)[0] == "RAWAN"   # 15:45 closing auction
+    assert universe.session_note(20 * 60) is None              # di luar jam bursa
+
+
+def test_market_regime_fails_closed_without_benchmark():
+    """Tanpa data IHSG, pasar TIDAK boleh dianggap bullish."""
+    ctx = strat.build_context(None)
+    assert ctx.available is False
+    frame = strat.Breakout().prepare(
+        pd.DataFrame({"open": [1.0] * 5, "high": [1.0] * 5, "low": [1.0] * 5,
+                      "close": [1.0] * 5, "volume": [1.0] * 5},
+                     index=pd.date_range("2025-01-01", periods=5, freq="B")),
+        ctx)
+    assert not frame["bullish"].any()
+
+
+def test_import_legacy_portfolio(conn, cfg, tmp_path):
+    src = tmp_path / "portfolio.json"
+    src.write_text(json.dumps({
+        "snapshot_date": "2026-07-20",
+        "positions": [
+            {"ticker": "BBCA", "lots": 15, "avg": 9250, "invested": 13875000, "sl": 9000},
+            {"ticker": "BUMI", "lots": 20, "avg": 100, "invested": 200000},
+        ],
+    }))
+    count, notes = legacy.import_portfolio(conn, src, cfg.fees)
+    assert count == 2
+    positions = {p.ticker: p for p in portfolio.positions(conn)}
+    assert positions["BBCA"].stop_loss == 9000
+    assert positions["BUMI"].stop_loss is None
+    assert any("TANPA STOP LOSS" in n for n in notes)
+
+
+def test_import_legacy_skips_invalid_rows(conn, cfg, tmp_path):
+    src = tmp_path / "p.json"
+    src.write_text(json.dumps({"positions": [{"ticker": "XX", "lots": 0, "avg": 0}]}))
+    count, notes = legacy.import_portfolio(conn, src, cfg.fees)
+    assert count == 0 and notes
+
+
+def test_legacy_stats_stored_with_caveat(conn, tmp_path):
+    src = tmp_path / "h.json"
+    src.write_text(json.dumps({"stats": {"BELI": {"benar": 7, "salah": 3},
+                                         "JUAL": {"benar": 1, "salah": 1}}}))
+    summary = legacy.import_signal_history(conn, src)
+    assert summary["BELI"]["akurasi_pct"] == 70.0
+    caveat = db.get_meta(conn, "legacy_signal_stats_caveat")
+    assert caveat and "biaya" in caveat
