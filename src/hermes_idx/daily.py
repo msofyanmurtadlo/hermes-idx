@@ -77,9 +77,14 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
     for pos in positions:
         frame = datamod.load_ohlcv(conn, pos.ticker)
         if frame.empty:
+            # Tetap catat `tanpa_sl`: posisi tanpa stop loss berbahaya terlepas dari
+            # ada atau tidaknya data harga — justru lebih berbahaya, karena tidak ada
+            # yang memantaunya.
             report["posisi"].append({
                 "ticker": pos.ticker, "lot": pos.lot, "avg_price": pos.avg_price,
-                "error": "tidak ada data harga",
+                "stop_loss": pos.stop_loss, "tanpa_sl": pos.stop_loss is None,
+                "sektor": universe.sector_of(pos.ticker),
+                "error": "tidak ada data harga — jalankan `data update`",
             })
             continue
         action = portfolio.review(pos, frame, cfg, now.date())
@@ -169,7 +174,9 @@ def render_text(report: dict) -> str:
     else:
         for pos in report["posisi"]:
             if pos.get("error"):
-                lines.append(f"{pos['ticker']}: {pos['error']}")
+                flag = " ⚠️TANPA SL" if pos.get("tanpa_sl") else ""
+                lines.append(f"{pos['ticker']}: {pos['lot']} lot, avg "
+                             f"{pos['avg_price']:,.0f} — {pos['error']}{flag}")
                 continue
             flag = " ⚠️TANPA SL" if pos["tanpa_sl"] else ""
             lines.append(
