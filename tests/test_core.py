@@ -448,3 +448,44 @@ def test_legacy_stats_stored_with_caveat(conn, tmp_path):
     assert summary["BELI"]["akurasi_pct"] == 70.0
     caveat = db.get_meta(conn, "legacy_signal_stats_caveat")
     assert caveat and "biaya" in caveat
+
+
+# --------------------------------------------------------------------------- laporan harian
+
+def test_daily_report_works_with_empty_db(conn, cfg):
+    from hermes_idx import daily
+    report = daily.build(conn, cfg)
+    assert report["tidak_ada_sinyal_itu_normal"] is True
+    assert any("kosong" in w.lower() or "backtest" in w.lower() for w in report["peringatan"])
+    text = daily.render_text(report)
+    assert "bukan nasihat investasi" in text
+
+
+def test_daily_flags_position_without_stop_loss(conn, cfg):
+    from hermes_idx import daily
+    portfolio.record(conn, "BBCA", dt.date(2026, 7, 1), "BUY", 10, 9000, cfg.fees)
+    report = daily.build(conn, cfg)
+    assert "BBCA" in report["ringkasan_porto"]["tanpa_sl"]
+    assert "TANPA SL" in daily.render_text(report)
+
+
+def test_daily_warns_when_no_proven_strategy(conn, cfg):
+    from hermes_idx import daily
+    conn.execute(
+        "INSERT INTO backtest_result (strategy, expectancy, profit_factor, total_trades,"
+        " p_value) VALUES ('breakout', -0.2, 0.7, 100, 1.0)")
+    conn.commit()
+    report = daily.build(conn, cfg)
+    assert report["strategi_terbukti"] == []
+    assert any("TIDAK ADA strategi" in w for w in report["peringatan"])
+
+
+def test_v3_stop_uses_atr_not_fixed_two_percent(ohlc):
+    """Regresi bug v3: stop tidak boleh selalu persis 2%."""
+    s = strat.REGISTRY["v3score"]
+    frame = s.prepare(ohlc, strat.MarketContext())
+    widths = []
+    for i in range(250, len(frame), 10):
+        entry = float(frame["close"].iloc[i])
+        widths.append((entry - s.levels(frame, i, entry).stop_loss) / entry * 100)
+    assert max(widths) > 2.05, "stop masih terpaku 2% — bug v3 kembali"

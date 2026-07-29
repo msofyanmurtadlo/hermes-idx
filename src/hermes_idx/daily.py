@@ -1,0 +1,214 @@
+"""Laporan harian — pipeline lengkap dalam satu perintah.
+
+Dirancang untuk dipanggil cron/Hermes. Prinsipnya: **laporan tetap berguna walau tidak
+ada sinyal beli sama sekali.** Di pasar datar itu justru keadaan normal, dan laporan yang
+memaksakan rekomendasi setiap hari akan mendorong overtrading — persis yang membuat
+backtest rugi (lihat docs/BUKTI-01.md).
+
+Urutan isi disusun dari yang paling mendesak: posisi yang perlu di-cut lebih penting
+daripada sinyal beli baru.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+
+from . import data as datamod, portfolio, screen, universe
+
+URGENCY_ORDER = {"SEGERA": 0, "HARI INI": 1, "AMATI": 2}
+
+
+def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
+    """Kumpulkan seluruh isi laporan harian sebagai satu dict siap-render."""
+    now = as_of or dt.datetime.now()
+    report: dict = {
+        "tanggal": now.date().isoformat(),
+        "jam": now.strftime("%H:%M"),
+        "peringatan": [],
+        "sesi": None,
+        "pasar": {},
+        "posisi": [],
+        "aksi": [],
+        "sinyal": [],
+        "edge": {},
+    }
+
+    session = universe.session_note(now.hour * 60 + now.minute)
+    if session:
+        report["sesi"] = {"level": session[0], "catatan": session[1]}
+
+    # --- kesegaran data -----------------------------------------------------
+    age = datamod.data_age_days(conn)
+    report["umur_data_hari"] = age
+    stale = cfg.data["data"]["stale_after_days"]
+    if age is None:
+        report["peringatan"].append("Database kosong — jalankan `hermes-idx data update`.")
+    elif age > stale:
+        report["peringatan"].append(
+            f"Data terakhir berumur {age} hari (batas {stale}). Angka di bawah ini basi."
+        )
+
+    # --- rezim pasar --------------------------------------------------------
+    ctx = screen.context(conn, cfg)
+    benchmark = datamod.load_ohlcv(conn, cfg.data["data"]["benchmark"])
+    if benchmark.empty:
+        report["pasar"] = {"tersedia": False}
+        report["peringatan"].append(
+            "Data IHSG tidak ada — rezim pasar tidak bisa dinilai, semua sinyal beli "
+            "ditahan (fail-closed)."
+        )
+    else:
+        last = float(benchmark["close"].iloc[-1])
+        prev = float(benchmark["close"].iloc[-2]) if len(benchmark) > 1 else last
+        bullish = bool(ctx.bullish_regime.iloc[-1]) if ctx.bullish_regime is not None else False
+        report["pasar"] = {
+            "tersedia": True,
+            "ihsg": round(last, 2),
+            "perubahan_pct": round((last / prev - 1) * 100, 2) if prev else 0.0,
+            "bullish": bullish,
+            "catatan": "IHSG di atas MA200" if bullish else
+                       "IHSG di bawah MA200 — strategi long-only ditahan",
+        }
+
+    # --- posisi & aksi (paling mendesak duluan) -----------------------------
+    positions = portfolio.positions(conn)
+    total_pnl = 0.0
+    total_value = 0.0
+    for pos in positions:
+        frame = datamod.load_ohlcv(conn, pos.ticker)
+        if frame.empty:
+            report["posisi"].append({
+                "ticker": pos.ticker, "lot": pos.lot, "avg_price": pos.avg_price,
+                "error": "tidak ada data harga",
+            })
+            continue
+        action = portfolio.review(pos, frame, cfg, now.date())
+        last = float(frame["close"].iloc[-1])
+        total_pnl += action.pnl_rp
+        total_value += last * pos.lot * 100
+        report["posisi"].append({
+            "ticker": pos.ticker, "lot": pos.lot, "avg_price": pos.avg_price,
+            "last": last, "pnl_rp": action.pnl_rp, "pnl_pct": action.pnl_pct,
+            "stop_loss": pos.stop_loss, "tanpa_sl": pos.stop_loss is None,
+            "sektor": universe.sector_of(pos.ticker),
+        })
+        if action.action != "HOLD":
+            report["aksi"].append({
+                "ticker": action.ticker, "aksi": action.action, "urgensi": action.urgency,
+                "alasan": action.reason, "harga_limit": action.limit_price,
+                "lot": action.lot, "estimasi_terima": action.est_proceeds,
+            })
+
+    report["aksi"].sort(key=lambda a: URGENCY_ORDER.get(a["urgensi"], 9))
+    report["ringkasan_porto"] = {
+        "jumlah_posisi": len(positions),
+        "maks_posisi": cfg.data["akun"]["max_open_positions"],
+        "nilai_pasar": round(total_value, 0),
+        "unrealized_pnl": round(total_pnl, 0),
+        "exposure_pct": round(total_value / cfg.modal * 100, 1) if cfg.modal else 0.0,
+        "tanpa_sl": [p["ticker"] for p in report["posisi"] if p.get("tanpa_sl")],
+    }
+
+    # --- edge: apakah ada strategi yang layak dipakai? ----------------------
+    known = screen.edges(conn)
+    usable = []
+    for name, node in known.items():
+        exp = node.get("expectancy")
+        pval = node.get("p_value")
+        report["edge"][name] = {
+            "expectancy": exp, "profit_factor": node.get("profit_factor"),
+            "trade": node.get("total_trades"), "p_value": pval,
+        }
+        if exp is not None and exp > 0 and pval is not None and pval <= 0.05:
+            usable.append(name)
+    report["strategi_terbukti"] = usable
+
+    if not known:
+        report["peringatan"].append(
+            "Belum ada hasil backtest. Jalankan `hermes-idx compare` untuk tahu apakah ada "
+            "strategi yang punya edge sebelum memakai sinyal beli."
+        )
+    elif not usable:
+        report["peringatan"].append(
+            "TIDAK ADA strategi dengan expectancy positif yang signifikan pada data ini. "
+            "Sinyal beli di bawah ini belum terbukti menguntungkan — perlakukan sebagai "
+            "bahan pengamatan, bukan rekomendasi."
+        )
+
+    # --- sinyal beli --------------------------------------------------------
+    try:
+        signals, warns = screen.scan(conn, cfg, top=cfg.data["screening"]["max_results"])
+        report["peringatan"].extend(w for w in warns if w not in report["peringatan"])
+        report["sinyal"] = [s.as_row() for s in signals]
+    except Exception as exc:  # noqa: BLE001 — laporan harus tetap terbit
+        report["peringatan"].append(f"Screening gagal: {exc}")
+
+    report["tidak_ada_sinyal_itu_normal"] = not report["sinyal"]
+    return report
+
+
+def render_text(report: dict) -> str:
+    """Render jadi teks polos — cocok untuk WhatsApp/Telegram, tanpa tabel markdown."""
+    lines: list[str] = [f"LAPORAN IDX — {report['tanggal']} {report['jam']}"]
+
+    for warning in report["peringatan"]:
+        lines.append(f"⚠️ {warning}")
+
+    pasar = report.get("pasar") or {}
+    if pasar.get("tersedia"):
+        mark = "✅ BULLISH" if pasar["bullish"] else "🔴 BEARISH"
+        lines.append(f"\nIHSG {pasar['ihsg']:,.0f} ({pasar['perubahan_pct']:+.2f}%) — "
+                     f"{mark}. {pasar['catatan']}.")
+    if report.get("sesi"):
+        lines.append(f"⏰ {report['sesi']['catatan']}")
+
+    ring = report["ringkasan_porto"]
+    lines.append(f"\n=== PORTOFOLIO ({ring['jumlah_posisi']}/{ring['maks_posisi']} posisi) ===")
+    if not report["posisi"]:
+        lines.append("Belum ada posisi tercatat.")
+    else:
+        for pos in report["posisi"]:
+            if pos.get("error"):
+                lines.append(f"{pos['ticker']}: {pos['error']}")
+                continue
+            flag = " ⚠️TANPA SL" if pos["tanpa_sl"] else ""
+            lines.append(
+                f"{pos['ticker']}: {pos['lot']} lot, avg {pos['avg_price']:,.0f} → "
+                f"{pos['last']:,.0f} | P/L Rp{pos['pnl_rp']:+,.0f} "
+                f"({pos['pnl_pct']:+.2f}%){flag}"
+            )
+        lines.append(f"Total unrealized: Rp{ring['unrealized_pnl']:+,.0f} | "
+                     f"exposure {ring['exposure_pct']:.0f}% modal")
+        if ring["tanpa_sl"]:
+            lines.append(f"⚠️ Tanpa stop loss: {', '.join(ring['tanpa_sl'])} — "
+                         f"tetapkan dengan `port plan <TICKER> --sl <harga>`")
+
+    lines.append("\n=== AKSI ===")
+    if not report["aksi"]:
+        lines.append("Tidak ada yang perlu dieksekusi. Semua posisi masih sesuai rencana.")
+    else:
+        for act in report["aksi"]:
+            harga = f" @ {act['harga_limit']:,.0f}" if act["harga_limit"] else ""
+            lines.append(f"[{act['urgensi']}] {act['ticker']} — {act['aksi']}{harga}: "
+                         f"{act['alasan']}")
+
+    lines.append("\n=== SINYAL BELI ===")
+    if not report["sinyal"]:
+        lines.append("Tidak ada sinyal hari ini. Ini normal — sistem menahan diri saat "
+                     "tidak ada setup yang memenuhi syarat.")
+    else:
+        if not report.get("strategi_terbukti"):
+            lines.append("(Belum ada strategi yang terbukti untung — perlakukan sebagai "
+                         "pengamatan, bukan rekomendasi.)")
+        for sig in report["sinyal"]:
+            lines.append(
+                f"{sig['ticker']} (skor {sig['score']:.0f}) — entry {sig['entry_price']:,} "
+                f"| SL {sig['stop_loss']:,} ({sig['sl_pct']:.1f}%) "
+                f"| TP1 {sig['tp1']:,} | TP2 {sig['tp2']:,} "
+                f"| {sig['position_lot']} lot, risiko Rp{sig['risk_rp']:,.0f}"
+            )
+            lines.append(f"   {sig['notes']}")
+
+    lines.append("\nAlat bantu analisis teknikal, bukan nasihat investasi. "
+                 "Keputusan transaksi sepenuhnya tanggung jawab Anda.")
+    return "\n".join(lines)

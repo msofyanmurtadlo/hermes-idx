@@ -309,6 +309,25 @@ def _num(value):
     return None if value is None or (isinstance(value, float) and math.isnan(value)) else float(value)
 
 
+@app.command()
+def daily(home: Optional[Path] = HOME_OPT, as_json: bool = JSON_OPT,
+          update: bool = typer.Option(False, "--update", help="Update data dulu.")):
+    """Laporan harian lengkap: rezim pasar, porto, aksi, sinyal. Untuk cron/Hermes."""
+    from . import daily as dailymod
+
+    cfg, conn = _ctx(home)
+    if update:
+        source = datamod.YahooSource(cfg.data["data"]["rate_limit_per_sec"])
+        rows = conn.execute("SELECT ticker FROM emiten WHERE is_active = 1").fetchall()
+        symbols = [cfg.data["data"]["benchmark"]] + [r["ticker"] for r in rows]
+        datamod.update(conn, symbols, source, cfg.data["data"]["history_years"])
+
+    report = dailymod.build(conn, cfg)
+    agent.emit({"ok": True, **report}, as_json)
+    if not as_json:
+        console.print(dailymod.render_text(report))
+
+
 @app.command("compare")
 def compare_cmd(strategy: Optional[str] = typer.Option(None, "--strategy",
                                                        help="Dipisah koma. Default: semua."),
