@@ -40,30 +40,37 @@ python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)' \
     || die "butuh Python >= 3.11, terpasang $PYV"
 ok "python $PYV"
 
-python3 - <<'PY' || die "numpy/pandas tidak tersedia. Di Termux: pkg install python-numpy python-pandas"
-import numpy, pandas
-print(f"  numpy {numpy.__version__} · pandas {pandas.__version__}")
-PY
-ok "numpy & pandas"
-
 # --- 2. Pasang paket ----------------------------------------------------------
-# --no-build-isolation supaya pip TIDAK mengunduh & mengkompilasi ulang numpy/pandas
-# di dalam venv sementara — di Android itu bisa berjam-jam atau gagal total.
-PIP_ARGS="--no-build-isolation"
+# Perbedaan penting antar platform:
+#   Termux — numpy & pandas HARUS dari `pkg`. Membiarkan pip membangunnya dari source
+#            di Android bisa berjam-jam atau gagal total, jadi dipakai
+#            --no-build-isolation agar pip memakai yang sudah ada.
+#   Linux  — biarkan pip memasang semuanya ke dalam .venv seperti biasa.
 if [ "$IS_TERMUX" = 1 ]; then
+    python3 - <<'PY' || die "numpy/pandas tidak ada. Jalankan: pkg install python-numpy python-pandas"
+import numpy, pandas
+print(f"  numpy {numpy.__version__} · pandas {pandas.__version__} (dari pkg)")
+PY
+    ok "numpy & pandas"
     say "Memasang hermes-idx (memakai numpy/pandas sistem)…"
-    pip install $PIP_ARGS -e . || die "pip install gagal"
+    pip install --no-build-isolation -e . || die "pip install gagal"
+    BIN_HINT="hermes-idx"
 else
-    if [ ! -d .venv ]; then python3 -m venv .venv; fi
+    [ -d .venv ] || python3 -m venv .venv
     say "Memasang hermes-idx ke .venv…"
     .venv/bin/pip install -q --upgrade pip >/dev/null 2>&1 || true
     .venv/bin/pip install -q -e . || die "pip install gagal"
-    warn "Aktifkan dengan: source .venv/bin/activate"
+    .venv/bin/python -c 'import numpy,pandas; print(f"  numpy {numpy.__version__} · pandas {pandas.__version__}")'
+    BIN_HINT="source .venv/bin/activate && hermes-idx"
 fi
 ok "paket terpasang"
 
-BIN=$(command -v hermes-idx 2>/dev/null || echo "./.venv/bin/hermes-idx")
-[ -x "$BIN" ] || die "hermes-idx tidak ditemukan setelah instalasi"
+if [ "$IS_TERMUX" = 1 ]; then
+    BIN=$(command -v hermes-idx 2>/dev/null || true)
+else
+    BIN="$PWD/.venv/bin/hermes-idx"
+fi
+[ -n "${BIN:-}" ] && [ -x "$BIN" ] || die "hermes-idx tidak ditemukan setelah instalasi"
 
 # --- 3. Inisialisasi ----------------------------------------------------------
 "$BIN" init >/dev/null && ok "config & database dibuat"
@@ -90,10 +97,10 @@ cat <<EOF
 
 ${BOLD}Selesai.${OFF} Langkah berikutnya:
 
-  hermes-idx data update      # ambil OHLCV (10–30 menit pertama kali)
-  hermes-idx compare          # adu strategi — LAKUKAN INI SEBELUM PAKAI SINYAL
-  hermes-idx scan             # cari sinyal hari ini
-  hermes-idx doctor           # diagnostik
+  ${BIN_HINT} data update      # ambil OHLCV (10–30 menit pertama kali)
+  ${BIN_HINT} compare          # adu strategi — LAKUKAN INI SEBELUM PAKAI SINYAL
+  ${BIN_HINT} scan             # cari sinyal hari ini
+  ${BIN_HINT} doctor           # diagnostik
 
 ${YELLOW}Baca dulu:${OFF} 'hermes-idx compare' memberi tahu apakah ada strategi yang
 benar-benar punya edge pada data Anda. Pada data uji kami (bluechip IDX 2021–2026)
