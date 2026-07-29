@@ -61,7 +61,18 @@ else
     .venv/bin/pip install -q --upgrade pip >/dev/null 2>&1 || true
     .venv/bin/pip install -q -e . || die "pip install gagal"
     .venv/bin/python -c 'import numpy,pandas; print(f"  numpy {numpy.__version__} · pandas {pandas.__version__}")'
-    BIN_HINT="source .venv/bin/activate && hermes-idx"
+    # Symlink ke ~/.local/bin supaya Hermes bisa memanggil `hermes-idx` sebagai
+    # perintah biasa tanpa mengaktifkan venv lebih dulu.
+    if mkdir -p "$HOME/.local/bin" 2>/dev/null; then
+        ln -sf "$PWD/.venv/bin/hermes-idx" "$HOME/.local/bin/hermes-idx" 2>/dev/null || true
+        case ":$PATH:" in
+            *":$HOME/.local/bin:"*) BIN_HINT="hermes-idx" ;;
+            *) BIN_HINT="hermes-idx"
+               warn "Tambahkan ke ~/.bashrc:  export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+        esac
+    else
+        BIN_HINT="source .venv/bin/activate && hermes-idx"
+    fi
 fi
 ok "paket terpasang"
 

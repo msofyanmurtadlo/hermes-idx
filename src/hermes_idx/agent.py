@@ -174,13 +174,31 @@ def verify(target: Path | None = None) -> list[Check]:
     checks: list[Check] = []
 
     binary = shutil.which("hermes-idx")
-    checks.append(Check(
-        "CLI di PATH",
-        binary is not None,
-        f"ditemukan di {binary}" if binary
-        else "hermes-idx tidak ada di PATH — agent tidak bisa memanggilnya. "
-             "Jalankan `pip install -e .` atau tambahkan venv/bin ke PATH.",
-    ))
+    # Kalau tidak ada di PATH, cari di sebelah interpreter yang sedang jalan — itu
+    # kasus umum: dipasang ke .venv tapi venv-nya belum diaktifkan. Bedakan "belum
+    # aktif" (tinggal aktifkan) dari "tidak terpasang" (harus install), karena
+    # perbaikannya berbeda.
+    local = Path(sys.executable).parent / "hermes-idx"
+    if binary:
+        detail, ok = f"ditemukan di {binary}", True
+    elif local.exists():
+        detail, ok = (
+            f"terpasang di {local}, tapi TIDAK ada di PATH — Hermes memanggil "
+            f"`hermes-idx` sebagai perintah, jadi ini harus dibereskan.\n"
+            f"      Perbaiki dengan salah satu:\n"
+            f"        source {local.parent}/activate\n"
+            f"        atau: ln -s {local} ~/.local/bin/hermes-idx\n"
+            f"        atau di Termux: pip install --no-build-isolation -e .",
+            False,
+        )
+    else:
+        detail, ok = (
+            "hermes-idx tidak ditemukan di mana pun. Jalankan `bash install.sh`.",
+            False,
+        )
+    checks.append(Check("CLI di PATH", ok, detail))
+    if not binary and local.exists():
+        binary = str(local)  # tetap uji kontrak JSON-nya lewat path langsung
 
     checks.append(Check(
         "Skill terpasang",
@@ -211,7 +229,7 @@ def verify(target: Path | None = None) -> list[Check]:
         except Exception as exc:  # noqa: BLE001
             checks.append(Check("Kontrak JSON", False, f"gagal memanggil CLI: {exc}"))
     else:
-        checks.append(Check("Kontrak JSON", False, "dilewati — CLI tidak ada di PATH"))
+        checks.append(Check("Kontrak JSON", False, "dilewati — CLI tidak ditemukan"))
 
     hermes_home = SKILL_HOME.parent.parent
     checks.append(Check(
