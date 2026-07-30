@@ -513,13 +513,20 @@ def test_trio_needs_all_three_indicators(ohlc):
         assert not s.entry_signal(rusak).any(), f"{kolom} tidak ikut menentukan entry"
 
 
-def test_trio_tp_above_entry_above_stop(ohlc):
+def test_trio_risk_reward_at_least_one_to_two(ohlc):
+    """RR minimal 1:2 — DAN exit EMA20 harus mati, kalau tidak RR-nya fiktif.
+
+    TP 2R yang dipotong exit di +0.27R bukan RR 1:2. Cek keduanya sekaligus supaya
+    menghidupkan lagi exit EMA20 tanpa sengaja langsung ketahuan.
+    """
     s = strat.REGISTRY["trio"]
     frame = s.prepare(ohlc, strat.MarketContext())
+    assert not s.exit_signal(frame).any(), "exit EMA20 hidup — RR 1:2 tidak akan terjadi"
     for i in range(250, len(frame), 25):
         entry = float(frame["close"].iloc[i])
         lv = s.levels(frame, i, entry)
         assert lv.stop_loss < entry < lv.tp1 <= lv.tp2
+        assert (lv.tp2 - entry) >= 2 * (entry - lv.stop_loss)
 
 
 def test_daily_warns_when_positions_exceed_limit(conn, cfg, monkeypatch):

@@ -462,8 +462,19 @@ class Trio:
     requires_bull_regime: bool = True
     rsi2_max: float = 10.0
     mfi_max: float = 30.0
-    atr_mult: float = 3.5
-    tp_r: float = 1.0
+    atr_mult: float = 3.0
+    tp_r: float = 3.0
+    """Target dalam kelipatan risiko. Lihat `exit_at_ema20` — angka ini tidak ada
+    artinya kalau pemenang dipotong sebelum sampai."""
+    exit_at_ema20: bool = False
+    """Keluar begitu harga balik ke EMA20.
+
+    True = mode WIN RATE (win rate 62.8%, expectancy -0.019R, RR nyata 0.56:1)
+    False = mode RISK-REWARD (win rate 34.5%, expectancy +0.132R, RR nyata 2.33:1)
+
+    Keduanya diukur pada 79 emiten IDX likuid, 2022-04 s/d 2026-07. Tidak ada
+    setelan yang memberi keduanya sekaligus — lihat catatan di `levels()`.
+    """
 
     def prepare(self, df: pd.DataFrame, ctx: MarketContext) -> pd.DataFrame:
         out = _common(df, ctx)
@@ -481,19 +492,46 @@ class Trio:
         ).fillna(False)
 
     def exit_signal(self, df: pd.DataFrame) -> pd.Series:
+        if not self.exit_at_ema20:
+            return pd.Series(False, index=df.index)
         return (df["close"] >= df["ema20"]).fillna(False)
 
     def levels(self, df: pd.DataFrame, i: int, entry: float) -> Levels:
+        """Risk-reward minimal 1:2 — dan itu MENGHARUSKAN exit EMA20 dimatikan.
+
+        Menaikkan tp_r saja tidak menghasilkan RR 1:2. Diukur pada 163 trade dengan
+        exit EMA20 masih hidup: 66.9% posisi keluar lewat exit itu di rata-rata
+        +0.266R, jauh sebelum TP tersentuh — hanya 6.7% yang benar-benar kena TP.
+        Jadi TP-nya boleh ditulis 2R atau 10R, RR yang BENAR-BENAR terjadi tetap
+        0.56:1 (avg win 0.463R / avg loss 0.833R). Target di atas kertas bukan RR.
+
+        Dengan exit EMA20 dimatikan, pemenang dibiarkan jalan sampai TP atau stop:
+
+            exit EMA20  ATR  TP    n    WR    avg W   avg L   RR nyata  exp     PF
+            hidup       3.0  2R   164  62.8%  +0.463  -0.833   0.56:1  -0.019  0.94
+            mati        3.0  2R   150  37.3%  +1.455  -0.840   1.73:1  +0.017  1.03
+            mati        3.0  3R   148  34.5%  +2.101  -0.903   2.33:1  +0.132  1.22  <- dipakai
+            mati        3.5  3R   147  36.1%  +1.741  -0.827   2.10:1  +0.099  1.19
+
+        Ini setelan pertama sepanjang pengujian yang expectancy-nya POSITIF
+        (+0.132R, profit factor 1.22, p=0.185). Harganya: win rate jatuh 62.8% ->
+        34.5%. Dua dari tiga trade akan rugi, dan itu bukan kegagalan — di RR 2.33:1
+        titik impasnya ada di win rate 30%.
+
+        Peringatan yang tidak boleh dihapus: p=0.185 berarti masih ada ~19%
+        kemungkinan hasil sebagus ini muncul dari keberuntungan belaka. Positif,
+        tapi BELUM terbukti secara statistik. Butuh lebih banyak trade.
+        """
         stop = min(_atr_stop(df, i, entry, self.atr_mult), entry * 0.995)
         risk = entry - stop
-        return Levels(stop, entry + 0.8 * risk, entry + self.tp_r * risk, 0.7, 0.3)
+        return Levels(stop, entry + risk, entry + self.tp_r * risk, 0.5, 0.5)
 
     def reason(self, df: pd.DataFrame, i: int) -> str:
         row = df.iloc[i]
         return (
             f"Tren utuh (harga di atas MA200 {row['ma200']:,.0f}), tapi RSI(2) "
             f"{row['rsi2']:.0f} oversold dan MFI {row['mfi']:.0f} menunjukkan tekanan "
-            f"jual berbobot volume. Target balik ke EMA20 ({row['ema20']:,.0f})."
+            f"jual berbobot volume. Ditahan sampai {self.tp_r:.0f}R atau stop kena."
         )
 
 
