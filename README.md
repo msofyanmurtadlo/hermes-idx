@@ -4,11 +4,20 @@
 close, keluarkan sinyal yang lengkap dengan stop loss, take profit, dan position size —
 plus backtest out-of-sample yang bisa Anda audit sendiri.
 
-> ⚠️ **STATUS: v0.2 — jalan penuh, tapi belum ada strategi yang terbukti untung.**
-> Pipeline lengkap berfungsi end-to-end. Yang belum terbukti adalah **edge**-nya: pada
-> data uji (51 bluechip IDX, 2021–2026) **tidak ada satu pun strategi dengan expectancy
-> positif setelah biaya**. Angka lengkapnya di [`docs/BUKTI-01.md`](docs/BUKTI-01.md).
-> Repo ini tidak akan mengklaim akurat sebelum `compare` membuktikannya.
+> ⚠️ **STATUS: v0.3 — satu strategi akhirnya lolos uji signifikansi.**
+> Pada universe **seluruh IDX (843 emiten, disaring likuiditas jadi 79)** dengan horizon
+> swing 12 hari bursa, `breakout` memberi expectancy **+0,317R, profit factor 1,50,
+> p=0,0022** atas 350 trade. Itu yang pertama menembus ambang p < 0,05 — dan tetap lolos
+> setelah koreksi Bonferroni untuk 6 strategi yang diuji (0,05/6 = 0,0083).
+>
+> Yang berubah dari v0.2 bukan strateginya, melainkan **tiga cacat pengukuran**: universe
+> terlalu sempit (51 bluechip), tidak ada batas horizon (posisi ditahan rata-rata 42 hari),
+> dan backtest tidak menyimulasikan rencana exit yang sebenarnya dipakai. Rinciannya di
+> riwayat commit; angka lengkapnya di [`docs/BUKTI-01.md`](docs/BUKTI-01.md).
+>
+> **Ini tetap bukan izin untuk mempertaruhkan uang.** 350 trade adalah sampel kecil,
+> periodenya satu rezim pasar, dan p=0,0022 bukan jaminan. Empat strategi lain masih
+> belum signifikan atau merugi.
 
 ## Pasang
 
@@ -36,8 +45,8 @@ Lima perintah, urut. Jangan dilompati — masing-masing menyiapkan yang berikutn
 | # | Perintah | Yang terjadi | Lama |
 |---|---|---|---|
 | 1 | `hermes-idx init` | Membuat file konfigurasi & database di `~/.hermes-idx/` | seketika |
-| 2 | `hermes-idx data seed-bluechip` | Mengisi daftar 51 emiten bluechip pilihan | seketika |
-| 3 | `hermes-idx data update` | Mengunduh harga harian 5 tahun ke belakang | 10–30 menit |
+| 2 | `hermes-idx data seed-idx` | Mengisi **seluruh 843 emiten IDX** (atau `seed-bluechip` untuk 51 pilihan saja) | seketika |
+| 3 | `hermes-idx data update` | Mengunduh harga harian 5 tahun ke belakang | 10–30 menit (843 emiten) |
 | 4 | `hermes-idx compare` | Menguji semua strategi pada data itu, lalu memberi vonis | 5–15 menit |
 | 5 | `hermes-idx daily --morning` | Laporan: porto, aksi, peringkat harian | ~1 menit |
 
@@ -144,23 +153,39 @@ Yang diberikan sebagai gantinya adalah `hermes-idx compare`: adu semua strategi 
 universe, periode, dan biaya yang sama, lalu vonis apa adanya.
 
 ```
-strategi         trade  win%   expect    PF    maxDD  vonis
-mean_reversion     282    58   -0.082  0.79   -22.5%  EXPECTANCY NEGATIF
-v3score            755    39   -0.143  0.71   -72.6%  EXPECTANCY NEGATIF
-breakout           176    22   -0.213  0.73   -38.7%  EXPECTANCY NEGATIF
-momentum_rs        380    28   -0.311  0.46   -69.9%  EXPECTANCY NEGATIF
-pullback           735    20   -0.377  0.47   -94.0%  EXPECTANCY NEGATIF
-
-Tidak ada strategi yang lolos ambang minimum. Jangan pakai sinyal apa pun
-dari sini untuk uang sungguhan sampai ada yang lolos.
+strategi         trade  win%   expect    PF    maxDD   p       vonis
+breakout           350  39.4   +0.317  1.50   -25.7%  0.0022  ADA EDGE
+trio               161  52.8   +0.076  1.23   -13.6%  0.157   TIDAK SIGNIFIKAN
+momentum_rs        325  39.4   +0.100  1.22   -29.7%  0.091   TIDAK SIGNIFIKAN
+v3score           1281  42.5   +0.024  1.06   -57.5%  0.257   TIDAK SIGNIFIKAN
+mean_reversion     363  60.3   -0.060  0.79   -28.4%  1.0     EXPECTANCY NEGATIF
+pullback           898  25.7   -0.265  0.60   -94.0%  1.0     EXPECTANCY NEGATIF
 ```
 
-Kenapa semua negatif? **IHSG hanya naik 1,4% dalam 5,1 tahun** pada periode uji. Pasar
-datar + biaya transaksi 0,40% round-trip = strategi long-only yang sering bertransaksi
-pasti kalah. Itu aritmetika, bukan kegagalan kode — beli-dan-tahan pun cuma median +1,8%.
+Universe seluruh IDX (843 emiten → 79 lolos likuiditas Rp20 M/hari), 2022–2026, horizon
+swing 12 hari bursa, biaya 0,40% round-trip + slippage 1 tick.
 
-Perhatikan `mean_reversion`: win rate 58%, tertinggi, tapi tetap rugi. Itu tepat kenapa
-sistem ini memeringkat dengan expectancy, bukan win rate.
+Dua baris yang paling penting dibaca berpasangan:
+
+**`mean_reversion`: win rate 60,3% — tertinggi — tapi tetap RUGI.** Ini bukan anomali,
+ini justru pelajaran utamanya. Win rate tinggi mudah dibuat: lebarkan stop loss dan
+dekatkan target. Setiap trade jadi lebih mungkin ditutup untung, dan setiap kekalahan
+jadi jauh lebih mahal. Karena itu sistem ini memeringkat dengan **expectancy**, dan
+menampilkan win rate hanya sebagai informasi.
+
+**`breakout`: win rate 39,4% — hampir dua dari tiga trade rugi — tapi satu-satunya yang
+lolos uji signifikansi.** Kemenangannya cukup besar untuk menutup semua kekalahan itu.
+
+Kenapa dulu semuanya negatif? **IHSG hanya naik 1,4% dalam 5,1 tahun** pada periode uji,
+dan biaya 0,40% round-trip memakan strategi long-only yang sering bertransaksi. Yang
+berubah bukan pasarnya, tapi tiga cacat pengukuran yang diperbaiki: universe diperluas
+dari 51 bluechip ke seluruh IDX, horizon dibatasi 12 hari (dulu posisi ditahan rata-rata
+42 hari tanpa batas), dan backtest sekarang menyimulasikan rencana exit yang benar-benar
+dipakai — dulu `tp1`, `tp1_size`, dan `breakeven_at_r` diabaikan mesin backtest.
+
+Yang terakhir itu memberi hasil yang membantah dugaan umum: mengaktifkan partial TP +
+breakeven **menaikkan win rate 34,5% → 46,5% tapi menjatuhkan expectancy jadi negatif**.
+Karena itu keduanya dimatikan secara default.
 
 **Alat yang jujur bilang "belum ada edge" lebih berguna daripada alat yang mengklaim 90%
 akurat.** Yang pertama menyelamatkan modal Anda; yang kedua menghabiskannya.
@@ -199,7 +224,7 @@ lebih berdampak ke profitabilitas daripada perbaikan strategi apa pun.
 
 | Dokumen | Isi |
 |---|---|
-| [`docs/PRD.md`](docs/PRD.md) | Spesifikasi lengkap: arsitektur, 4 strategi bawaan, model data, metodologi backtest, CLI, integrasi Termux |
+| [`docs/PRD.md`](docs/PRD.md) | Spesifikasi lengkap: arsitektur, 6 strategi bawaan (S1–S4 + v3score + trio), model data, metodologi backtest, CLI, integrasi Termux |
 | [`docs/REVIEW-01.md`](docs/REVIEW-01.md) | Review kritis PRD — 5 blocker, 8 temuan serius, 12 menengah. **Baca ini kalau mau berkontribusi.** |
 | [`docs/TERMUX.md`](docs/TERMUX.md) | Pasang di Android, migrasi dari script v3, dan cara membereskan scheduling yang mati |
 | [`docs/BUKTI-01.md`](docs/BUKTI-01.md) | **Hasil adu strategi + bug yang ditemukan di script v3.** Angka mentah, bisa direproduksi |
