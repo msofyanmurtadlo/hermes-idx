@@ -176,83 +176,95 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
 
 def render_text(report: dict) -> str:
     """Render jadi teks polos — cocok untuk WhatsApp/Telegram, tanpa tabel markdown."""
-    lines: list[str] = [f"LAPORAN IDX — {report['tanggal']} {report['jam']}"]
+    lines: list[str] = []
 
-    for warning in report["peringatan"]:
-        lines.append(f"⚠️ {warning}")
+    # --- Header ---
+    lines.append(f"📊 *LAPORAN IDX* — {report['tanggal']} {report['jam']}")
+    lines.append("")
 
+    # --- Pasar ---
     pasar = report.get("pasar") or {}
     if pasar.get("tersedia"):
-        mark = "✅ BULLISH" if pasar["bullish"] else "🔴 BEARISH"
-        lines.append(f"\nIHSG {pasar['ihsg']:,.0f} ({pasar['perubahan_pct']:+.2f}%) — "
-                     f"{mark}. {pasar['catatan']}.")
+        mark = "🟢 BULLISH" if pasar["bullish"] else "🔴 BEARISH"
+        lines.append(f"*Pasar:* IHSG {pasar['ihsg']:,.0f} ({pasar['perubahan_pct']:+.2f}%) {mark}")
+        lines.append(f"_{pasar['catatan']}_")
     if report.get("sesi"):
         lines.append(f"⏰ {report['sesi']['catatan']}")
+    lines.append("")
 
+    # --- Portofolio ---
     ring = report["ringkasan_porto"]
-    lines.append(f"\n=== PORTOFOLIO ({ring['jumlah_posisi']}/{ring['maks_posisi']} posisi) ===")
+    lines.append(f"*💼 PORTOFOLIO* ({ring['jumlah_posisi']}/{ring['maks_posisi']} posisi)")
     if ring.get("trading_balance") is not None:
-        lines.append(f"Trading Balance: Rp{ring['trading_balance']:,.0f}")
-    if ring.get("total_equity") is not None:
-        lines.append(f"Total Equity: Rp{ring['total_equity']:,.0f}")
+        lines.append(f"Balance: Rp{ring['trading_balance']:,.0f} | Equity: Rp{ring.get('total_equity', 0):,.0f}")
+    lines.append("")
+
     if not report["posisi"]:
-        lines.append("Belum ada posisi tercatat.")
+        lines.append("_Belum ada posisi tercatat._")
     else:
         for pos in report["posisi"]:
             if pos.get("error"):
-                flag = " ⚠️TANPA SL" if pos.get("tanpa_sl") else ""
-                flag += " ⚠️TIDAK TERPANTAU"
-                lines.append(f"{pos['ticker']}: {pos['lot']} lot, avg "
-                             f"{pos['avg_price']:,.0f} — {pos['error']}{flag}")
+                flag = " ⚠️" if pos.get("tanpa_sl") else ""
+                lines.append(f"• *{pos['ticker']}*{flag} — {pos['error']}")
                 continue
-            flag = " ⚠️TANPA SL" if pos["tanpa_sl"] else ""
+            # Emoji status: 🟢 untung, 🔴 rugi
+            icon = "🟢" if pos["pnl_pct"] >= 0 else "🔴"
+            flag = " ⚠️NO SL" if pos["tanpa_sl"] else ""
             lines.append(
-                f"{pos['ticker']}: {pos['lot']} lot, avg {pos['avg_price']:,.0f} → "
-                f"{pos['last']:,.0f} | P/L Rp{pos['pnl_rp']:+,.0f} "
-                f"({pos['pnl_pct']:+.2f}%){flag}"
+                f"{icon} *{pos['ticker']}* {pos['lot']}lot | "
+                f"avg {pos['avg_price']:,.0f} → {pos['last']:,.0f} | "
+                f"P/L {pos['pnl_pct']:+.1f}%{flag}"
             )
-            # Baris SL/TP dengan jarak — info monitoring paling penting.
+            # Baris SL/TP dengan jarak
             parts = []
             if pos.get("stop_loss"):
-                parts.append(f"SL {pos['stop_loss']:,.0f} ({pos['sl_dist_pct']:+.1f}%)")
+                parts.append(f"SL {pos['stop_loss']:,.0f} (jarak {pos['sl_dist_pct']:.1f}%)")
             if pos.get("tp1"):
-                parts.append(f"TP1 {pos['tp1']:,.0f} ({pos['tp1_dist_pct']:+.1f}%)")
+                parts.append(f"TP {pos['tp1']:,.0f} (jarak {pos['tp1_dist_pct']:.1f}%)")
             if pos.get("tp2"):
-                parts.append(f"TP2 {pos['tp2']:,.0f} ({pos['tp2_dist_pct']:+.1f}%)")
+                parts.append(f"TP2 {pos['tp2']:,.0f} (jarak {pos['tp2_dist_pct']:.1f}%)")
             if parts:
-                lines.append(f"   {' | '.join(parts)}")
-        lines.append(f"Total unrealized: Rp{ring['unrealized_pnl']:+,.0f} | "
-                     f"exposure {ring['exposure_pct']:.0f}% modal")
-        if ring["tanpa_sl"]:
-            lines.append(f"⚠️ Tanpa stop loss: {', '.join(ring['tanpa_sl'])} — "
-                         f"tetapkan dengan `port plan <TICKER> --sl <harga>`")
+                lines.append(f"   {' → '.join(parts)}")
 
-    lines.append("\n=== AKSI ===")
+        lines.append("")
+        lines.append(f"📈 Unrealized: Rp{ring['unrealized_pnl']:+,.0f} | Exposure: {ring['exposure_pct']:.0f}%")
+        if ring["tanpa_sl"]:
+            lines.append(f"⚠️ Tanpa SL: {', '.join(ring['tanpa_sl'])}")
+    lines.append("")
+
+    # --- Aksi ---
+    lines.append("*⚡ AKSI*")
     if not report["aksi"]:
-        lines.append("Tidak ada yang perlu dieksekusi. Semua posisi masih sesuai rencana.")
+        lines.append("_Tidak ada. Semua posisi sesuai rencana._")
     else:
         for act in report["aksi"]:
             harga = f" @ {act['harga_limit']:,.0f}" if act["harga_limit"] else ""
-            lines.append(f"[{act['urgensi']}] {act['ticker']} — {act['aksi']}{harga}: "
-                         f"{act['alasan']}")
+            lines.append(f"[{act['urgensi']}] *{act['ticker']}* — {act['aksi']}{harga}")
+            lines.append(f"   _{act['alasan']}_")
+    lines.append("")
 
-    lines.append("\n=== SINYAL BELI ===")
+    # --- Sinyal Beli ---
+    lines.append("*🔍 SINYAL BELI*")
     if not report["sinyal"]:
-        lines.append("Tidak ada sinyal hari ini. Ini normal — sistem menahan diri saat "
-                     "tidak ada setup yang memenuhi syarat.")
+        lines.append("_Tidak ada. Sistem menahan diri — tidak ada setup memenuhi syarat._")
     else:
         if not report.get("strategi_terbukti"):
-            lines.append("(Belum ada strategi yang terbukti untung — perlakukan sebagai "
-                         "pengamatan, bukan rekomendasi.)")
+            lines.append("_(Belum terbukti untung — pengamatan, bukan rekomendasi)_")
         for sig in report["sinyal"]:
             lines.append(
-                f"{sig['ticker']} (skor {sig['score']:.0f}) — entry {sig['entry_price']:,} "
-                f"| SL {sig['stop_loss']:,} ({sig['sl_pct']:.1f}%) "
-                f"| TP1 {sig['tp1']:,} | TP2 {sig['tp2']:,} "
-                f"| {sig['position_lot']} lot, risiko Rp{sig['risk_rp']:,.0f}"
+                f"• *{sig['ticker']}* skor {sig['score']:.0f} | "
+                f"Entry {sig['entry_price']:,} | SL {sig['stop_loss']:,} | "
+                f"TP {sig['tp1']:,} | {sig['position_lot']} lot"
             )
-            lines.append(f"   {sig['notes']}")
+            lines.append(f"   _{sig['notes']}_")
+    lines.append("")
 
-    lines.append("\nAlat bantu analisis teknikal, bukan nasihat investasi. "
-                 "Keputusan transaksi sepenuhnya tanggung jawab Anda.")
+    # --- Peringatan (di bawah, bukan di atas — biar nggak nutupin info utama) ---
+    if report["peringatan"]:
+        lines.append("*⚠️ CATATAN*")
+        for warning in report["peringatan"]:
+            lines.append(f"• {warning}")
+        lines.append("")
+
+    lines.append("_Alat bantu analisis teknikal, bukan nasihat investasi._")
     return "\n".join(lines)

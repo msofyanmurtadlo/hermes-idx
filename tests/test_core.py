@@ -466,7 +466,7 @@ def test_daily_flags_position_without_stop_loss(conn, cfg):
     portfolio.record(conn, "BBCA", dt.date(2026, 7, 1), "BUY", 10, 9000, cfg.fees)
     report = daily.build(conn, cfg)
     assert "BBCA" in report["ringkasan_porto"]["tanpa_sl"]
-    assert "TANPA SL" in daily.render_text(report)
+    assert "Tanpa SL" in daily.render_text(report)
 
 
 def test_daily_warns_when_no_proven_strategy(conn, cfg):
@@ -505,4 +505,4 @@ def test_untracked_position_marked_in_report(conn, cfg):
     from hermes_idx import daily
     portfolio.record(conn, "WIDI", dt.date(2026, 7, 1), "BUY", 1, 110, cfg.fees)
     text = daily.render_text(daily.build(conn, cfg))
-    assert "TIDAK TERPANTAU" in text
+    assert "tidak ada data harga" in text
