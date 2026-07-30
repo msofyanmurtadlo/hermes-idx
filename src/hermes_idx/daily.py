@@ -243,6 +243,93 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
     }
 
     # --- edge: apakah ada strategi yang layak dipakai? ----------------------
+    # --- rekomendasi tambah posisi -------------------------------------------
+    max_open = int(cfg.data["akun"]["max_open_positions"])
+    slots_free = max_open - len(positions)
+    report["slot_tersedia"] = slots_free
+    report["saldo_tersedia"] = trading_balance
+    if slots_free > 0 and trading_balance and trading_balance > 0:
+        # Estimasi: pakai peringkat teratas sebagai kandidat
+        try:
+            peringkat, _ = screen.rank(conn, cfg, top=slots_free + len(positions))
+            kandidat = []
+            held_tickers = {p.ticker for p in positions}
+            for row in peringkat:
+                if row["ticker"] in held_tickers:
+                    continue  # sudah punya
+                entry = row.get("entry_price", 0)
+                if entry and entry > 0:
+                    lot_est = int(trading_balance / (entry * 100))
+                    if lot_est >= 1:
+                        kandidat.append({
+                            "ticker": row["ticker"], "entry": entry,
+                            "lot_est": lot_est, "skor": row.get("score", 0),
+                            "label": row.get("label", ""),
+                            "sl": row.get("stop_loss"), "tp1": row.get("tp1"),
+                            "rr": row.get("rr_tp1", 0),
+                        })
+            report["rekomendasi_tambah"] = kandidat[:slots_free]
+        except Exception:  # noqa: BLE001
+            report["rekomendasi_tambah"] = []
+    else:
+        report["rekomendasi_tambah"] = []
+
+    # --- saran reposisi SL/TP per posisi (ala penasihat profesional) ---------
+    reposisi = []
+    for pos in positions:
+        live = all_live.get(pos.ticker)
+        last = live["price"] if live else None
+        if not last or not pos.avg_price or pos.avg_price <= 0:
+            continue
+        pnl_pct = (last / pos.avg_price - 1) * 100
+        sl = pos.stop_loss
+        tp1 = getattr(pos, "tp1", None)
+        saran_list = []
+
+        # 1) Profit > 5% tapi SL masih di bawah avg → naikkan ke breakeven
+        if pnl_pct >= 5 and sl and sl < pos.avg_price:
+            saran_list.append(
+                f"🔒 Profit +{pnl_pct:.1f}% — naikkan SL ke breakeven "
+                f"({pos.avg_price:,.0f}) biar profit terkunci"
+            )
+        # 1b) Profit > 5% dan SL udah di atas avg tapi masih jauh dari harga → trailing
+        elif pnl_pct >= 5 and sl and sl >= pos.avg_price and last > 0:
+            sl_dist = (last - sl) / last * 100
+            if sl_dist > 3:
+                trail = round(last * 0.97, -1)  # 3% di bawah harga
+                if trail > sl:
+                    saran_list.append(
+                        f"📈 Profit +{pnl_pct:.1f}% — trailing SL naik ke ~{trail:,.0f} "
+                        f"(kunci profit, SL lama {sl:,.0f} terlalu jauh {sl_dist:.1f}%)"
+                    )
+        # 2) Dekat TP1 (< 5%) → siapkan jual sebagian
+        if tp1 and last > 0:
+            tp1_dist = (tp1 - last) / last * 100
+            if 0 < tp1_dist <= 5:
+                saran_list.append(
+                    f"🎯 Harga {last:,.0f} tinggal {tp1_dist:.1f}% dari TP1 {tp1:,.0f} — "
+                    f"jual 50% di TP1, sisanya trailing SL"
+                )
+        # 3) Loss > 5% dan SL masih jauh (> 8%) → perketat
+        if pnl_pct <= -5 and sl and last > 0:
+            sl_dist = (last - sl) / last * 100
+            if sl_dist > 8:
+                saran_list.append(
+                    f"⚠️ Loss {pnl_pct:.1f}% tapi SL masih {sl_dist:.1f}% jauh — "
+                    f"pertimbangkan perketat SL atau cut loss sebagian"
+                )
+        # 4) Tanpa SL → wajib pasang
+        if not sl:
+            saran_list.append("🚨 TANPA SL — pasang segera, posisi tidak terproteksi")
+        # 5) Tanpa TP → pasang target
+        if not tp1 and pos.avg_price >= 50:
+            saran_list.append("📌 Tanpa TP — pasang target profit biar ada rencana exit")
+
+        if saran_list:
+            reposisi.append({"ticker": pos.ticker, "saran": saran_list})
+    report["saran_reposisi"] = reposisi
+
+    # --- edge: apakah ada strategi yang layak dipakai? ----------------------
     known = screen.edges(conn)
     usable = []
     for name, node in known.items():
@@ -353,6 +440,34 @@ def render_text(report: dict, mode: str = "full") -> str:
         if ring["tanpa_sl"]:
             lines.append(f"⚠️ Tanpa SL: {', '.join(ring['tanpa_sl'])}")
     lines.append("")
+
+    # --- Rekomendasi Tambah Posisi ---
+    if show_sinyal and report.get("rekomendasi_tambah"):
+        slot = report.get("slot_tersedia", 0)
+        saldo = report.get("saldo_tersedia", 0)
+        lines.append(f"*💡 REKOMENDASI TAMBAH* (slot {slot} kosong | saldo Rp{saldo:,.0f})")
+        for rec in report["rekomendasi_tambah"]:
+            badge = BADGE.get(rec["label"], "⚪")
+            sl_tp = ""
+            if rec.get("sl"):
+                sl_tp += f" | SL {rec['sl']:,.0f}"
+            if rec.get("tp1"):
+                sl_tp += f" | TP {rec['tp1']:,.0f}"
+            lines.append(
+                f"{badge} *{rec['ticker']}* skor {rec['skor']:.0f} · "
+                f"entry ~{rec['entry']:,.0f} | maks {rec['lot_est']} lot{sl_tp}"
+            )
+        lines.append("_Bukan ajakan beli — cek dulu trigger & manajemen risiko._")
+        lines.append("")
+
+    # --- Saran Reposisi SL/TP ---
+    if report.get("saran_reposisi"):
+        lines.append("*📐 SARAN REPOSISI SL/TP*")
+        for item in report["saran_reposisi"]:
+            lines.append(f"• *{item['ticker']}*")
+            for s in item["saran"]:
+                lines.append(f"   {s}")
+        lines.append("")
 
     # --- Aksi ---
     lines.append("*⚡ AKSI*")
