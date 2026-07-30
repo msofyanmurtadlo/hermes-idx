@@ -278,10 +278,14 @@ def analyze(ticker: str, explain: bool = typer.Option(False, "--explain"),
     prepared = strat.REGISTRY["breakout"].prepare(frame, ctx)
     last = prepared.iloc[-1]
     eligible, _ = datamod.universe(conn, cfg)
-    triggered = [
-        s.name for s in strat.get(None)
-        if bool(s.entry_signal(s.prepare(frame, ctx)).iloc[-1])
-    ]
+    triggered = []
+    for s in strat.get(None):
+        prepared_s = s.prepare(frame, ctx)
+        # momentum_rs butuh rs_rank (cross-sectional) — tidak tersedia untuk single ticker.
+        if "rs_rank" not in prepared_s.columns:
+            prepared_s["rs_rank"] = float("nan")
+        if bool(s.entry_signal(prepared_s).iloc[-1]):
+            triggered.append(s.name)
     payload = {
         "ok": True, "ticker": ticker, "date": str(prepared.index[-1].date()),
         "close": float(last["close"]),
