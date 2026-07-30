@@ -274,7 +274,7 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
     else:
         report["rekomendasi_tambah"] = []
 
-    # --- saran reposisi SL/TP per posisi (ala penasihat profesional) ---------
+    # --- saran reposisi SL/TP + trailing stop per posisi ----------------------
     reposisi = []
     for pos in positions:
         live = all_live.get(pos.ticker)
@@ -286,29 +286,45 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
         tp1 = getattr(pos, "tp1", None)
         saran_list = []
 
-        # 1) Profit > 5% tapi SL masih di bawah avg → naikkan ke breakeven
+        # --- Trailing stop logic ---
+        # Kapan trailing cocok:
+        #   a) Profit > 5% → kunci profit, biar harga yang tentuin exit
+        #   b) Dekat TP → jual sebagian, sisanya trailing
+        #   c) SL udah di atas avg tapi jauh dari harga → trailing lebih efisien
+        # Trail %: saham besar (BBCA/BBRI) 1-2%, mid/small 2-3%
+        trail_pct = 1.5 if pos.avg_price >= 1000 else 2.5
+        trail_stop = round(last * (1 - trail_pct / 100), -1)  # bulatkan ke tick
+
+        # 1) Profit > 5% tapi SL masih di bawah avg → trailing / breakeven
         if pnl_pct >= 5 and sl and sl < pos.avg_price:
             saran_list.append(
-                f"🔒 Profit +{pnl_pct:.1f}% — naikkan SL ke breakeven "
-                f"({pos.avg_price:,.0f}) biar profit terkunci"
+                f"🔒 Profit +{pnl_pct:.1f}% tapi SL {sl:,.0f} masih di bawah avg — "
+                f"naikkan minimal ke breakeven {pos.avg_price:,.0f}"
             )
-        # 1b) Profit > 5% dan SL udah di atas avg tapi masih jauh dari harga → trailing
+            if trail_stop > pos.avg_price:
+                saran_list.append(
+                    f"📈 Atau pakai *Trailing Stop*: trail {trail_pct:.1f}%, "
+                    f"stop ~{trail_stop:,.0f}, {pos.lot} lot, GTC"
+                )
+        # 1b) Profit > 5%, SL udah di atas avg tapi jauh → trailing lebih ketat
         elif pnl_pct >= 5 and sl and sl >= pos.avg_price and last > 0:
             sl_dist = (last - sl) / last * 100
-            if sl_dist > 3:
-                trail = round(last * 0.97, -1)  # 3% di bawah harga
-                if trail > sl:
-                    saran_list.append(
-                        f"📈 Profit +{pnl_pct:.1f}% — trailing SL naik ke ~{trail:,.0f} "
-                        f"(kunci profit, SL lama {sl:,.0f} terlalu jauh {sl_dist:.1f}%)"
-                    )
-        # 2) Dekat TP1 (< 5%) → siapkan jual sebagian
+            if sl_dist > 3 and trail_stop > sl:
+                saran_list.append(
+                    f"📈 Profit +{pnl_pct:.1f}% — SL {sl:,.0f} terlalu jauh ({sl_dist:.1f}%). "
+                    f"Ganti *Trailing Stop*: trail {trail_pct:.1f}%, stop ~{trail_stop:,.0f}, "
+                    f"{pos.lot} lot, GTC"
+                )
+        # 2) Dekat TP1 (< 5%) → jual sebagian + trailing sisanya
         if tp1 and last > 0:
             tp1_dist = (tp1 - last) / last * 100
             if 0 < tp1_dist <= 5:
+                half_lot = max(1, pos.lot // 2)
+                sisa_lot = pos.lot - half_lot
                 saran_list.append(
-                    f"🎯 Harga {last:,.0f} tinggal {tp1_dist:.1f}% dari TP1 {tp1:,.0f} — "
-                    f"jual 50% di TP1, sisanya trailing SL"
+                    f"🎯 Tinggal {tp1_dist:.1f}% dari TP1 {tp1:,.0f} — "
+                    f"jual {half_lot} lot di TP1, sisanya {sisa_lot} lot "
+                    f"*Trailing Stop* trail {trail_pct:.1f}% stop ~{trail_stop:,.0f}"
                 )
         # 3) Loss > 5% dan SL masih jauh (> 8%) → perketat
         if pnl_pct <= -5 and sl and last > 0:
@@ -530,6 +546,29 @@ def render_text(report: dict, mode: str = "full") -> str:
                 lines.append(f"   _{row['alasan']}_")
             lines.append("_Peringkat = urutan kesiapan, BUKAN ajakan beli._")
             lines.append("")
+
+    # --- Edge / Backtest terbaru ---
+    edge = report.get("edge", {})
+    if edge:
+        lines.append("*🔬 BACKTEST EDGE*")
+        for name, info in edge.items():
+            exp = info.get("expectancy")
+            pf = info.get("profit_factor")
+            trades = info.get("trade", 0)
+            pval = info.get("p_value")
+            if exp is None:
+                continue
+            icon = "✅" if exp > 0 and pval is not None and pval <= 0.05 else "❌"
+            lines.append(
+                f"{icon} {name}: exp {exp:+.3f}R | PF {pf:.2f} | "
+                f"{trades} trade | p={pval}"
+            )
+        proven = report.get("strategi_terbukti", [])
+        if proven:
+            lines.append(f"🟢 Edge terbukti: {', '.join(proven)}")
+        else:
+            lines.append("🔴 Belum ada strategi terbukti → sinyal beli = pengamatan saja")
+        lines.append("")
 
     # --- Peringatan (di bawah, bukan di atas — biar nggak nutupin info utama) ---
     if report["peringatan"]:
