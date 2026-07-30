@@ -12,10 +12,45 @@ daripada sinyal beli baru.
 from __future__ import annotations
 
 import datetime as dt
+import json
+import subprocess
 
 from . import data as datamod, portfolio, screen, universe
 
 URGENCY_ORDER = {"SEGERA": 0, "HARI INI": 1, "AMATI": 2}
+
+
+def fetch_live_prices(tickers: list[str]) -> dict[str, dict]:
+    """Ambil harga real-time dari TradingView Scanner API (1 request, batch).
+
+    Return {ticker: {"price": float, "chg_pct": float, "source": "TV"}}.
+    Gagal → dict kosong (laporan fallback ke DB).
+    """
+    if not tickers:
+        return {}
+    symbols = [f"IDX:{t}" for t in tickers]
+    payload = json.dumps({
+        "symbols": {"tickers": symbols, "query": {"types": []}},
+        "columns": ["close", "change", "volume", "high", "low", "open"],
+    })
+    try:
+        r = subprocess.run(
+            ["curl", "-s", "-m", "10",
+             "https://scanner.tradingview.com/indonesia/scan",
+             "-H", "Content-Type: application/json",
+             "-d", payload],
+            capture_output=True, text=True, timeout=15,
+        )
+        j = json.loads(r.stdout)
+        result = {}
+        for item in j.get("data", []):
+            ticker = item["s"].split(":")[-1]
+            d = item["d"]
+            if d[0] is not None:
+                result[ticker] = {"price": float(d[0]), "chg_pct": float(d[1] or 0), "source": "TV"}
+        return result
+    except Exception:
+        return {}
 
 
 def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
@@ -51,45 +86,71 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
     # --- rezim pasar --------------------------------------------------------
     ctx = screen.context(conn, cfg)
     benchmark = datamod.load_ohlcv(conn, cfg.data["data"]["benchmark"])
-    if benchmark.empty:
+
+    # Ambil harga live untuk semua ticker porto + IHSG (1 request batch)
+    positions = portfolio.positions(conn)
+    live_tickers = [pos.ticker for pos in positions]
+    bench_sym = cfg.data["data"]["benchmark"]  # "^JKSE"
+    # TradingView pakai "IDX:COMPOSITE" untuk IHSG
+    tv_bench = "IDX:COMPOSITE"
+    all_live = fetch_live_prices(live_tickers)
+    bench_live = fetch_live_prices(["COMPOSITE"])
+    live_bench_price = bench_live.get("COMPOSITE", {}).get("price")
+    live_bench_chg = bench_live.get("COMPOSITE", {}).get("chg_pct")
+
+    if benchmark.empty and not live_bench_price:
         report["pasar"] = {"tersedia": False}
         report["peringatan"].append(
             "Data IHSG tidak ada — rezim pasar tidak bisa dinilai, semua sinyal beli "
             "ditahan (fail-closed)."
         )
     else:
-        last = float(benchmark["close"].iloc[-1])
-        prev = float(benchmark["close"].iloc[-2]) if len(benchmark) > 1 else last
+        # Harga IHSG: live dulu, fallback DB
+        if live_bench_price:
+            last = live_bench_price
+            chg = live_bench_chg or 0.0
+            live_label = " (live)"
+        else:
+            last = float(benchmark["close"].iloc[-1])
+            prev = float(benchmark["close"].iloc[-2]) if len(benchmark) > 1 else last
+            chg = round((last / prev - 1) * 100, 2) if prev else 0.0
+            live_label = ""
         bullish = bool(ctx.bullish_regime.iloc[-1]) if ctx.bullish_regime is not None else False
         report["pasar"] = {
             "tersedia": True,
             "ihsg": round(last, 2),
-            "perubahan_pct": round((last / prev - 1) * 100, 2) if prev else 0.0,
+            "perubahan_pct": round(chg, 2),
             "bullish": bullish,
+            "live": bool(live_bench_price),
             "catatan": "IHSG di atas MA200" if bullish else
                        "IHSG di bawah MA200 — strategi long-only ditahan",
         }
 
     # --- posisi & aksi (paling mendesak duluan) -----------------------------
-    positions = portfolio.positions(conn)
     total_pnl = 0.0
     total_value = 0.0
+    live_count = 0
     for pos in positions:
         frame = datamod.load_ohlcv(conn, pos.ticker)
-        if frame.empty:
-            # Tetap catat `tanpa_sl`: posisi tanpa stop loss berbahaya terlepas dari
-            # ada atau tidaknya data harga — justru lebih berbahaya, karena tidak ada
-            # yang memantaunya.
+        # Harga: live TradingView dulu, fallback DB
+        live = all_live.get(pos.ticker)
+        if live:
+            last = live["price"]
+            live_count += 1
+        elif not frame.empty:
+            last = float(frame["close"].iloc[-1])
+        else:
             report["posisi"].append({
                 "ticker": pos.ticker, "lot": pos.lot, "avg_price": pos.avg_price,
                 "stop_loss": pos.stop_loss, "tanpa_sl": pos.stop_loss is None,
                 "sektor": universe.sector_of(pos.ticker),
-                "error": "tidak ada data harga — jalankan `data update`",
+                "error": "tidak ada data harga",
             })
             continue
-        action = portfolio.review(pos, frame, cfg, now.date())
-        last = float(frame["close"].iloc[-1])
-        total_pnl += action.pnl_rp
+        # P/L dihitung dari harga live
+        pnl_rp = (last - pos.avg_price) * pos.lot * 100
+        pnl_pct = (last / pos.avg_price - 1) * 100 if pos.avg_price else 0.0
+        total_pnl += pnl_rp
         total_value += last * pos.lot * 100
         # Jarak ke SL/TP — info paling penting untuk monitoring harian.
         sl = pos.stop_loss
@@ -98,20 +159,23 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
         sl_dist = round((last - sl) / last * 100, 1) if sl else None
         tp1_dist = round((tp1 - last) / last * 100, 1) if tp1 else None
         tp2_dist = round((tp2 - last) / last * 100, 1) if tp2 else None
+        # Review aksi tetap pakai frame DB (butuh history indikator)
+        if not frame.empty:
+            action = portfolio.review(pos, frame, cfg, now.date())
+            if action.action != "HOLD":
+                report["aksi"].append({
+                    "ticker": action.ticker, "aksi": action.action, "urgensi": action.urgency,
+                    "alasan": action.reason, "harga_limit": action.limit_price,
+                    "lot": action.lot, "estimasi_terima": action.est_proceeds,
+                })
         report["posisi"].append({
             "ticker": pos.ticker, "lot": pos.lot, "avg_price": pos.avg_price,
-            "last": last, "pnl_rp": action.pnl_rp, "pnl_pct": action.pnl_pct,
+            "last": last, "pnl_rp": pnl_rp, "pnl_pct": pnl_pct,
             "stop_loss": sl, "tp1": tp1, "tp2": tp2,
             "sl_dist_pct": sl_dist, "tp1_dist_pct": tp1_dist, "tp2_dist_pct": tp2_dist,
-            "tanpa_sl": sl is None,
+            "tanpa_sl": sl is None, "live": bool(live),
             "sektor": universe.sector_of(pos.ticker),
         })
-        if action.action != "HOLD":
-            report["aksi"].append({
-                "ticker": action.ticker, "aksi": action.action, "urgensi": action.urgency,
-                "alasan": action.reason, "harga_limit": action.limit_price,
-                "lot": action.lot, "estimasi_terima": action.est_proceeds,
-            })
 
     report["aksi"].sort(key=lambda a: URGENCY_ORDER.get(a["urgensi"], 9))
     max_open = int(cfg.data["akun"]["max_open_positions"])
@@ -134,6 +198,8 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
         "tanpa_sl": [p["ticker"] for p in report["posisi"] if p.get("tanpa_sl")],
         "trading_balance": trading_balance,
         "total_equity": total_equity,
+        "live_count": live_count,
+        "total_posisi": len(positions),
     }
 
     # --- edge: apakah ada strategi yang layak dipakai? ----------------------
@@ -203,7 +269,8 @@ def render_text(report: dict, mode: str = "full") -> str:
 
     # --- Portofolio ---
     ring = report["ringkasan_porto"]
-    lines.append(f"*💼 PORTOFOLIO* ({ring['jumlah_posisi']}/{ring['maks_posisi']} posisi)")
+    live_tag = f" 📡{ring.get('live_count', 0)}/{ring.get('total_posisi', 0)} live" if ring.get("live_count") else ""
+    lines.append(f"*💼 PORTOFOLIO* ({ring['jumlah_posisi']}/{ring['maks_posisi']} posisi){live_tag}")
     if ring.get("trading_balance") is not None:
         lines.append(f"Balance: Rp{ring['trading_balance']:,.0f} | Equity: Rp{ring.get('total_equity', 0):,.0f}")
     lines.append("")

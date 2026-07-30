@@ -452,8 +452,9 @@ def test_legacy_stats_stored_with_caveat(conn, tmp_path):
 
 # --------------------------------------------------------------------------- laporan harian
 
-def test_daily_report_works_with_empty_db(conn, cfg):
+def test_daily_report_works_with_empty_db(conn, cfg, monkeypatch):
     from hermes_idx import daily
+    monkeypatch.setattr(daily, "fetch_live_prices", lambda tickers: {})
     report = daily.build(conn, cfg)
     assert report["tidak_ada_sinyal_itu_normal"] is True
     assert any("kosong" in w.lower() or "backtest" in w.lower() for w in report["peringatan"])
@@ -461,16 +462,18 @@ def test_daily_report_works_with_empty_db(conn, cfg):
     assert "bukan nasihat investasi" in text
 
 
-def test_daily_flags_position_without_stop_loss(conn, cfg):
+def test_daily_flags_position_without_stop_loss(conn, cfg, monkeypatch):
     from hermes_idx import daily
+    monkeypatch.setattr(daily, "fetch_live_prices", lambda tickers: {})
     portfolio.record(conn, "BBCA", dt.date(2026, 7, 1), "BUY", 10, 9000, cfg.fees)
     report = daily.build(conn, cfg)
     assert "BBCA" in report["ringkasan_porto"]["tanpa_sl"]
     assert "Tanpa SL" in daily.render_text(report)
 
 
-def test_daily_warns_when_no_proven_strategy(conn, cfg):
+def test_daily_warns_when_no_proven_strategy(conn, cfg, monkeypatch):
     from hermes_idx import daily
+    monkeypatch.setattr(daily, "fetch_live_prices", lambda tickers: {})
     conn.execute(
         "INSERT INTO backtest_result (strategy, expectancy, profit_factor, total_trades,"
         " p_value) VALUES ('breakout', -0.2, 0.7, 100, 1.0)")
@@ -491,8 +494,9 @@ def test_v3_stop_uses_atr_not_fixed_two_percent(ohlc):
     assert max(widths) > 2.05, "stop masih terpaku 2% — bug v3 kembali"
 
 
-def test_daily_warns_when_positions_exceed_limit(conn, cfg):
+def test_daily_warns_when_positions_exceed_limit(conn, cfg, monkeypatch):
     from hermes_idx import daily
+    monkeypatch.setattr(daily, "fetch_live_prices", lambda tickers: {})
     cfg.data["akun"]["max_open_positions"] = 2
     for t, p in [("BBCA", 9000), ("BBRI", 4000), ("TLKM", 3000)]:
         portfolio.record(conn, t, dt.date(2026, 7, 1), "BUY", 1, p, cfg.fees)
@@ -500,9 +504,10 @@ def test_daily_warns_when_positions_exceed_limit(conn, cfg):
     assert any("melebihi batas" in w for w in report["peringatan"])
 
 
-def test_untracked_position_marked_in_report(conn, cfg):
+def test_untracked_position_marked_in_report(conn, cfg, monkeypatch):
     """Posisi tanpa data harga harus terlihat jelas — bukan hilang diam-diam."""
     from hermes_idx import daily
+    monkeypatch.setattr(daily, "fetch_live_prices", lambda tickers: {})
     portfolio.record(conn, "WIDI", dt.date(2026, 7, 1), "BUY", 1, 110, cfg.fees)
     text = daily.render_text(daily.build(conn, cfg))
     assert "tidak ada data harga" in text
