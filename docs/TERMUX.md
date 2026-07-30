@@ -80,43 +80,59 @@ Jangan dihapus dulu — kalau ada yang tidak beres, tinggal `enabled=true` lagi.
 
 ### Pasang job baru
 
-**Laporan sore** — pipeline lengkap setelah market close:
-
-```
-cronjob action=create \
-  name="Laporan IDX Sore" \
-  schedule="30 16 * * 1-5" \
-  script="hermes-idx-daily.sh" \
-  provider=custom model=qwen3.8-max-preview
-```
-
-**Pengingat pagi** — porto & aksi saja, tanpa data update:
-
-```
-cronjob action=create \
-  name="Reminder Pagi IDX" \
-  schedule="45 8 * * 1-5" \
-  script="hermes-idx-morning.sh" \
-  provider=custom model=qwen3.8-max-preview
-```
-
-Isi `~/.hermes/scripts/hermes-idx-daily.sh`:
+Kedua laporan sekarang dijalankan oleh **satu script**, `scripts/hermes-idx-report.sh`,
+dengan argumen `pagi` atau `sore`. Cara paling sederhana adalah cron biasa, tanpa
+melewati Hermes sama sekali:
 
 ```bash
-#!/data/data/com.termux/files/usr/bin/bash
-termux-wake-lock 2>/dev/null || true
-hermes-idx daily --update
-termux-wake-unlock 2>/dev/null || true
+pkg install -y cronie termux-api
+crontab -e
 ```
 
-Isi `~/.hermes/scripts/hermes-idx-morning.sh`:
+Isi crontab:
+
+```cron
+30 7  * * 1-5 ~/hermes-idx/scripts/hermes-idx-report.sh pagi
+30 16 * * 1-5 ~/hermes-idx/scripts/hermes-idx-report.sh sore
+```
+
+Jam 07:30 dipilih agar selesai sebelum pre-opening (08:45); 16:30 setelah bursa tutup
+(16:00) supaya bar harian Yahoo sudah final.
+
+`crond` harus hidup setelah HP reboot. Buat `~/.termux/boot/start-crond.sh`
+(butuh aplikasi **Termux:Boot**):
 
 ```bash
-#!/data/data/com.termux/files/usr/bin/bash
-hermes-idx daily
+#!/data/data/com.termux/files/usr/bin/sh
+PREFIX=/data/data/com.termux/files/usr
+pgrep -x crond >/dev/null 2>&1 || "$PREFIX/bin/crond"
 ```
 
-Keduanya perlu `chmod +x`.
+`chmod 700` keduanya.
+
+> **Kenapa script-nya panjang, tidak sekadar `hermes-idx daily`?**
+> cron mengosongkan environment. Selain `PATH`/`PREFIX`, Android butuh `ANDROID_ROOT`
+> dan `ANDROID_DATA` — tanpa itu bionic libc gagal membuka tzdata dan Python mati dengan
+> **Segmentation fault**, bukan pesan error yang bisa ditebak. Uji dulu persis seperti
+> cron akan menjalankannya:
+>
+> ```bash
+> env -i sh -c '~/hermes-idx/scripts/hermes-idx-report.sh sore; echo EXIT=$?'
+> ```
+>
+> Harus `EXIT=0`. Kalau segfault, environment-nya yang kurang, bukan aplikasinya.
+
+Hasilnya ditulis ke `~/.hermes-idx/laporan/`:
+
+| Berkas | Isi |
+|---|---|
+| `YYYY-MM-DD-pagi.txt` / `-sore.txt` | arsip per hari |
+| `terbaru-pagi.txt` / `terbaru-sore.txt` | selalu laporan terakhir — ini yang dibaca agent |
+| `cron.log` | jejak tiap run, berikut kegagalannya |
+
+Notifikasi HP muncul otomatis kalau aplikasi **Termux:API** terpasang (paket
+`termux-api` saja tidak cukup — aplikasinya harus ada juga). Tanpa itu laporan tetap
+ditulis ke berkas, hanya tidak ada notifikasi.
 
 ### Pinning model
 

@@ -38,6 +38,21 @@ DEFAULTS: dict[str, Any] = {
         "min_score": 55,
         "max_results": 15,
         "market_regime_filter": True,
+        # Panjang MA rezim harus cocok dengan horizon dagang. 200 = tren jangka panjang
+        # (Fidelity menyebutnya alat untuk "long-term trends"); 50 mengikuti pergerakan
+        # harga terkini; 20 untuk horizon sangat pendek.
+        #
+        # Default 50, bukan 200, karena diukur — bukan karena lebih pendek terdengar
+        # cocok untuk trading harian. Pada data ini (lihat docs/BUKTI-01.md):
+        #   v3score        MA200 -0,194 → MA50 -0,124  (membaik, dan trade 523 → 651)
+        #   breakout       MA200 -0,224 → MA50 -0,219  (praktis sama)
+        #   mean_reversion MA200 -0,082 → MA50 -0,182  (MEMBURUK 2,2×)
+        #
+        # Jadi 50 menang untuk dua dari tiga, tapi `mean_reversion` jelas lebih suka 200.
+        # Kalau strategi itu yang dipakai, kembalikan ke 200. Semua angka tetap NEGATIF —
+        # memperpendek MA memperbanyak sinyal, tidak menciptakan edge.
+        "regime_ma_period": 50,
+        "regime_below_days": 10,
         "valid_days": 3,
     },
     "universe": {

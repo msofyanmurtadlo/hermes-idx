@@ -8,3 +8,9 @@ dist/
 *.db
 *.db-wal
 *.db-shm
+
+# Artefak tooling lokal
+.claude/
+.claude-flow/
+.code-review-graph/
+graphify-out/

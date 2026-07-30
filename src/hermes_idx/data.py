@@ -163,9 +163,26 @@ def _f(value) -> float | None:
 
 
 def _estimate_value(row) -> float | None:
+    """Nilai transaksi harian ≈ harga tipikal × volume.
+
+    Nilai sebenarnya = jumlah (harga × lot) seluruh transaksi hari itu, dan hanya IDX
+    yang punya angka itu — endpoint resminya diblokir Cloudflare (403). TradingView pun
+    tidak membantu: kolom `Value.Traded` miliknya ternyata persis `close × volume`
+    (dicek pada BBCA: 6.450 × 152.663.200 = 984.677.640.000, sama sampai digit terakhir).
+
+    Karena itu tetap estimasi, tapi memakai harga tipikal (H+L+C)/3 alih-alih close
+    saja. Close adalah satu titik di ujung hari; pada bar yang bergerak lebar, close bisa
+    jauh dari harga rata-rata transaksi. Harga tipikal jauh lebih dekat ke VWAP.
+    """
     if pd.isna(row.get("volume")) or pd.isna(row.get("close")):
         return None
-    return float(row["volume"]) * float(row["close"])
+    close = float(row["close"])
+    high, low = row.get("high"), row.get("low")
+    if pd.notna(high) and pd.notna(low) and float(high) >= float(low) > 0:
+        price = (float(high) + float(low) + close) / 3
+    else:
+        price = close
+    return float(row["volume"]) * price
 
 
 def last_date(conn: sqlite3.Connection, ticker: str) -> dt.date | None:
@@ -226,6 +243,111 @@ def update(
     return results
 
 
+# --------------------------------------------------------------------------- intraday
+
+INTRADAY_LIMITS: dict[str, str] = {
+    "1m": "5d", "5m": "60d", "15m": "60d", "30m": "60d", "60m": "730d",
+}
+"""Kedalaman maksimum per interval — batas keras Yahoo, diukur langsung pada ticker .JK.
+
+Angka ini menentukan seberapa jauh strategi intraday bisa diuji, dan perbedaannya besar:
+5m hanya 60 hari bursa (satu rezim pasar saja, tidak cukup untuk menyimpulkan edge),
+sementara 60m menjangkau ~3 tahun dan melewati beberapa rezim. Minta range lebih panjang
+dari daftar ini tidak menghasilkan error — Yahoo diam-diam memotongnya.
+"""
+
+
+def fetch_intraday(ticker: str, interval: str = "60m", timeout: float = 30.0
+                   ) -> pd.DataFrame:
+    """Ambil bar intraday. DataFrame ber-index `ts` (waktu Jakarta, tanpa tzinfo)."""
+    if interval not in INTRADAY_LIMITS:
+        raise ValueError(
+            f"interval '{interval}' tidak didukung (pilih: {', '.join(INTRADAY_LIMITS)})")
+    symbol = ticker if ticker.startswith("^") else f"{ticker}.JK"
+    with httpx.Client(headers=UA, timeout=timeout, follow_redirects=True) as client:
+        resp = client.get(YAHOO_CHART.format(symbol=symbol),
+                          params={"interval": interval, "range": INTRADAY_LIMITS[interval]})
+        if resp.status_code == 404:
+            return pd.DataFrame()
+        resp.raise_for_status()
+        frame = _parse_yahoo_intraday(resp.json())
+    return frame
+
+
+def _parse_yahoo_intraday(payload: dict) -> pd.DataFrame:
+    result = (payload.get("chart") or {}).get("result") or []
+    if not result:
+        return pd.DataFrame()
+    node = result[0]
+    stamps = node.get("timestamp") or []
+    if not stamps:
+        return pd.DataFrame()
+    quote = node["indicators"]["quote"][0]
+    frame = pd.DataFrame(
+        {"open": quote.get("open"), "high": quote.get("high"), "low": quote.get("low"),
+         "close": quote.get("close"), "volume": quote.get("volume")},
+        # Bar intraday TIDAK di-normalize ke tengah malam seperti bar harian — jamnya
+        # justru informasi utamanya (sesi pembukaan vs penutupan berperilaku beda).
+        index=pd.to_datetime(pd.Series(stamps), unit="s", utc=True)
+        .dt.tz_convert("Asia/Jakarta").dt.tz_localize(None),
+    )
+    frame.index.name = "ts"
+    return frame.dropna(subset=["close"])
+
+
+def upsert_intraday(conn: sqlite3.Connection, ticker: str, frame: pd.DataFrame,
+                    interval: str, source: str = "yahoo") -> int:
+    if frame.empty:
+        return 0
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    rows = [
+        (ticker, ts.isoformat(sep=" "), interval,
+         _f(row.get("open")), _f(row.get("high")), _f(row.get("low")), _f(row.get("close")),
+         int(row["volume"]) if pd.notna(row.get("volume")) else None, source, now)
+        for ts, row in frame.iterrows()
+    ]
+    conn.executemany(
+        "INSERT INTO ohlcv_intraday (ticker, ts, interval, open, high, low, close, volume,"
+        " source, fetched_at) VALUES (?,?,?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(ticker, ts, interval) DO UPDATE SET open=excluded.open,"
+        " high=excluded.high, low=excluded.low, close=excluded.close,"
+        " volume=excluded.volume, fetched_at=excluded.fetched_at",
+        rows,
+    )
+    conn.commit()
+    return len(rows)
+
+
+def load_intraday(conn: sqlite3.Connection, ticker: str, interval: str = "60m"
+                  ) -> pd.DataFrame:
+    frame = pd.read_sql_query(
+        "SELECT ts, open, high, low, close, volume FROM ohlcv_intraday"
+        " WHERE ticker = ? AND interval = ? ORDER BY ts",
+        conn, params=[ticker, interval], parse_dates=["ts"],
+    )
+    return frame.set_index("ts") if not frame.empty else frame
+
+
+def update_intraday(conn: sqlite3.Connection, tickers: Iterable[str], interval: str = "60m",
+                    progress=None) -> dict[str, int]:
+    """Sama seperti `update()`: satu ticker gagal tidak menghentikan sisanya."""
+    results: dict[str, int] = {}
+    for ticker in tickers:
+        try:
+            count = upsert_intraday(conn, ticker, fetch_intraday(ticker, interval), interval)
+        except Exception as exc:  # noqa: BLE001
+            results[ticker] = -1
+            set_meta(conn, f"error:intraday:{ticker}", f"{dt.date.today()}: {exc}")
+            if progress:
+                progress(ticker, -1)
+            continue
+        results[ticker] = count
+        set_meta(conn, f"last_intraday:{interval}", dt.datetime.now().isoformat(timespec="seconds"))
+        if progress:
+            progress(ticker, count)
+    return results
+
+
 def data_age_days(conn: sqlite3.Connection) -> int | None:
     """Umur data terbaru dalam hari kalender. None bila database kosong."""
     row = conn.execute("SELECT MAX(date) AS d FROM ohlcv").fetchone()
@@ -261,7 +383,15 @@ def universe(conn: sqlite3.Connection, cfg) -> tuple[list[str], list[str]]:
         """
     ).fetchall()
 
-    tickers, estimated_any = [], False
+    minimum = uni["min_avg_value_20d"]
+    # Estimasi nilai transaksi meleset beberapa persen dari angka sebenarnya. Itu hanya
+    # PENTING kalau ada emiten yang duduk dekat ambang, di mana meleset sedikit bisa
+    # membalik keputusan lolos/tidak. Untuk BBCA (Rp985 miliar vs ambang Rp2 miliar)
+    # selisih 5% tidak mengubah apa pun. Dulu peringatan ini muncul di SETIAP run tanpa
+    # syarat, jadi ia jadi bising yang dilewati mata, bukan informasi.
+    BORDERLINE = 0.25
+
+    tickers, borderline = [], []
     for row in rows:
         if row["ticker"].startswith("^"):
             continue
@@ -270,16 +400,20 @@ def universe(conn: sqlite3.Connection, cfg) -> tuple[list[str], list[str]]:
         close = row["last_close"] or 0
         if not (uni["min_price"] <= close <= uni["max_price"]):
             continue
-        if (row["avg_value"] or 0) < uni["min_avg_value_20d"]:
+        value = row["avg_value"] or 0
+        if row["estimated"] and minimum and abs(value - minimum) <= minimum * BORDERLINE:
+            borderline.append((row["ticker"], value))
+        if value < minimum:
             continue
-        estimated_any = estimated_any or bool(row["estimated"])
         tickers.append(row["ticker"])
 
     warnings = []
-    if estimated_any:
+    if borderline:
+        detail = ", ".join(f"{t} (≈Rp{v / 1e9:.1f} M)" for t, v in sorted(borderline))
         warnings.append(
-            "Nilai transaksi harian diestimasi dari volume × close (sumber tidak menyediakan "
-            "nilai rupiah sebenarnya). Filter likuiditas karena itu bersifat aproksimasi — "
-            "lihat issue #4."
+            f"Nilai transaksi adalah estimasi (harga tipikal × volume) — IDX tidak "
+            f"membuka angka sebenarnya. Emiten ini duduk dalam ±{BORDERLINE:.0%} dari "
+            f"ambang likuiditas Rp{minimum / 1e9:.1f} M, jadi lolos/tidaknya bisa berubah "
+            f"kalau estimasinya meleset: {detail}."
         )
     return sorted(tickers), warnings

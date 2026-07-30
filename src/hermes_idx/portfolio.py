@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from . import indicators as ind, market
+from . import indicators as ind, market  # noqa: F401 — market dipakai plan_advice
 
 URGENCY = {"CUT_LOSS": "SEGERA", "TAKE_PROFIT_1": "HARI INI", "TAKE_PROFIT_2": "HARI INI",
            "EXIT_SIGNAL": "HARI INI", "TIME_STOP": "AMATI", "DETERIORATION": "AMATI",
@@ -54,11 +54,21 @@ def record(conn, ticker: str, date: dt.date, kind: str, lot: int, price: float,
         raise ValueError("type harus BUY atau SELL")
 
     fee = fees.buy_cost(price, lot) if kind == "BUY" else fees.sell_cost(price, lot)
-    conn.execute(
+    cur = conn.execute(
         "INSERT OR IGNORE INTO transaksi (ticker, date, type, lot, price, fee, signal_id,"
         " source, notes) VALUES (?,?,?,?,?,?,?,?,?)",
         (ticker, date.isoformat(), kind, lot, price, fee, signal_id, source, notes),
     )
+    # UNIQUE(ticker,date,type,lot,price) bikin transaksi identik ditolak diam-diam. Dulu
+    # `posisi` tetap diperbarui, jadi ledger dan posisi divergen tanpa jejak: dua BUY
+    # identik → posisi 20 lot tapi transaksi cuma 1 baris. Sekarang operasinya idempoten.
+    if cur.rowcount == 0:
+        conn.commit()
+        raise ValueError(
+            f"transaksi {kind} {ticker} {lot} lot @ {price:,.0f} pada {date} sudah tercatat "
+            f"— tidak diproses ulang. Kalau ini memang transaksi kedua yang berbeda, "
+            f"bedakan lewat harga atau catat dengan tanggal yang benar."
+        )
 
     row = conn.execute("SELECT * FROM posisi WHERE ticker = ?", (ticker,)).fetchone()
     if kind == "BUY":
@@ -130,10 +140,18 @@ def set_plan(conn, ticker: str, stop_loss: float | None = None, tp1: float | Non
     conn.commit()
 
 
-def review(pos: Position, df: pd.DataFrame, cfg, today: dt.date | None = None) -> Action:
-    """SB-6/SB-7: satu aksi per posisi, dengan alasan, urgensi, dan estimasi P/L."""
+def review(pos: Position, df: pd.DataFrame, cfg, today: dt.date | None = None,
+           last_price: float | None = None) -> Action:
+    """SB-6/SB-7: satu aksi per posisi, dengan alasan, urgensi, dan estimasi P/L.
+
+    `last_price` = harga real-time bila tersedia. Tanpa ini, keputusan CUT_LOSS/TP diambil
+    dari close terakhir di DB — yang saat intraday masih bar KEMARIN. Akibatnya laporan
+    bisa menampilkan "SL jarak +2,6% (aman)" dari harga live sekaligus "CUT_LOSS SEGERA"
+    dari harga basi, dengan harga limit di bawah pasar. Indikator (ATR, chandelier,
+    struktur) tetap dari `df` karena butuh riwayat; hanya level keputusan yang live.
+    """
     today = today or dt.date.today()
-    last = float(df["close"].iloc[-1])
+    last = float(last_price) if last_price else float(df["close"].iloc[-1])
     date = df.index[-1].date()
     fees = cfg.fees
     exit_cfg = cfg.data["exit"]
@@ -187,6 +205,90 @@ def review(pos: Position, df: pd.DataFrame, cfg, today: dt.date | None = None) -
         pnl_pct=round(pnl_pct, 2),
         est_proceeds=round(market.net_sell_value(last, lot_to_sell, fees), 0),
     )
+
+
+def plan_advice(pos: Position, df: pd.DataFrame, cfg, last_price: float | None = None
+                ) -> dict | None:
+    """Usulan SL/TP baru untuk posisi berjalan. None bila rencana sekarang sudah wajar.
+
+    Hanya mengusulkan yang bisa dipertanggungjawabkan dari data, dan tidak pernah
+    MENURUNKAN stop loss — menggeser SL ke bawah saat posisi memburuk adalah cara paling
+    umum mengubah rugi kecil jadi rugi besar.
+    """
+    last = float(last_price) if last_price else float(df["close"].iloc[-1])
+    date = df.index[-1].date()
+
+    # Data masuk yang mustahil tidak boleh dijadikan dasar hitungan: WIDI dengan
+    # avg_price 1,1 menghasilkan usulan "SL 50 | TP1 50" — dua level identik di harga
+    # lantai bursa, angka yang terlihat resmi tapi tidak berarti apa-apa. Lebih jujur
+    # menolak menghitung dan menyuruh perbaiki sumbernya.
+    if pos.avg_price < market.HARGA_MIN:
+        return {
+            "ticker": pos.ticker,
+            "alasan": [f"Harga beli tercatat {pos.avg_price:,.2f}, di bawah harga minimum "
+                       f"bursa Rp{market.HARGA_MIN}. SL/TP tidak bisa dihitung dari angka "
+                       f"ini — perbaiki dulu harga belinya."],
+            "perintah": f"hermes-idx port add {pos.ticker} --lot {pos.lot} "
+                        f"--price <harga_beli_sebenarnya>",
+        }
+
+    atr_value = float(ind.atr(df, 14).iloc[-1]) if len(df) > 14 else float("nan")
+    if not np.isfinite(atr_value) or atr_value <= 0:
+        atr_value = last * 0.02
+
+    usul: dict = {"ticker": pos.ticker, "alasan": []}
+
+    sl_baru = None
+    if pos.stop_loss is None:
+        sl_baru = last - 2 * atr_value
+        usul["alasan"].append(
+            f"Belum punya stop loss. Usulan 2×ATR di bawah harga ({atr_value:,.0f} × 2)."
+        )
+    else:
+        risk = pos.avg_price - pos.stop_loss
+        r_now = (last - pos.avg_price) / risk if risk > 0 else None
+        if r_now is not None and r_now >= cfg.data["exit"]["trailing_activate_at_r"]:
+            trail = float(ind.chandelier_exit(df, 22, 3.0).iloc[-1])
+            if np.isfinite(trail) and trail > pos.stop_loss and trail < last:
+                sl_baru = trail
+                usul["alasan"].append(
+                    f"Sudah +{r_now:.1f}R. Naikkan SL ke trailing chandelier untuk "
+                    f"mengunci sebagian untung."
+                )
+
+    tp_baru = None
+    if pos.tp1 is not None and pos.tp1 <= pos.avg_price:
+        # Kasus nyata di porto: TP1 di BAWAH harga beli — kena target justru rugi.
+        risk = (pos.avg_price - pos.stop_loss) if pos.stop_loss else 2 * atr_value
+        tp_baru = pos.avg_price + 1.5 * max(risk, atr_value)
+        usul["alasan"].append(
+            f"TP1 {pos.tp1:,.0f} berada di bawah harga beli {pos.avg_price:,.0f}. "
+            f"Usulan target 1,5R di atas harga beli."
+        )
+    elif pos.tp1 is None:
+        risk = (pos.avg_price - pos.stop_loss) if pos.stop_loss else 2 * atr_value
+        tp_baru = pos.avg_price + 2 * max(risk, atr_value)
+        usul["alasan"].append("Belum punya target jual. Usulan 2R dari harga beli.")
+
+    if sl_baru is None and tp_baru is None:
+        return None
+    # Usulan yang tidak koheren (target di bawah/di harga stop) lebih buruk daripada
+    # tidak mengusulkan apa-apa — pemakai akan menyalin perintahnya mentah-mentah.
+    if sl_baru is not None and tp_baru is not None and tp_baru <= sl_baru:
+        return None
+    if sl_baru is not None:
+        usul["stop_loss_baru"] = market.round_to_tick(max(sl_baru, market.HARGA_MIN),
+                                                      date, "down")
+        usul["stop_loss_lama"] = pos.stop_loss
+    if tp_baru is not None:
+        usul["tp1_baru"] = market.round_to_tick(tp_baru, date, "down")
+        usul["tp1_lama"] = pos.tp1
+    usul["perintah"] = "hermes-idx port plan {} {}{}".format(
+        pos.ticker,
+        f"--sl {usul['stop_loss_baru']} " if sl_baru is not None else "",
+        f"--tp1 {usul['tp1_baru']}" if tp_baru is not None else "",
+    ).strip()
+    return usul
 
 
 def _deteriorating(df: pd.DataFrame, lookback: int = 10) -> bool:

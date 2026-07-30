@@ -200,6 +200,47 @@ def data_seed(file: Path = typer.Argument(..., help="CSV berkolom ticker,nama,se
         console.print(f"[green]{count} emiten[/green] tercatat.")
 
 
+@data_app.command("intraday")
+def data_intraday(interval: str = typer.Option("60m", "--interval",
+                                               help="1m, 5m, 15m, 30m, atau 60m."),
+                  tickers: Optional[str] = typer.Option(None, "--tickers",
+                                                        help="Daftar dipisah koma."),
+                  home: Optional[Path] = HOME_OPT, as_json: bool = JSON_OPT):
+    """Ambil bar intraday (untuk strategi & backtest intraday).
+
+    Kedalaman ditentukan Yahoo, bukan kita: 5m/15m/30m hanya 60 hari bursa, 60m sampai
+    ~3 tahun. Interval kecil karena itu TIDAK cukup untuk menyimpulkan edge.
+    """
+    cfg, conn = _ctx(home)
+    if interval not in datamod.INTRADAY_LIMITS:
+        _fail(f"interval '{interval}' tidak didukung "
+              f"(pilih: {', '.join(datamod.INTRADAY_LIMITS)})", as_json)
+    if tickers:
+        symbols = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+    else:
+        rows = conn.execute("SELECT ticker FROM emiten WHERE is_active = 1").fetchall()
+        symbols = [r["ticker"] for r in rows]
+        if not symbols:
+            _fail("Daftar emiten kosong. Jalankan `hermes-idx data seed-bluechip`.", as_json)
+    held = [r["ticker"] for r in conn.execute("SELECT ticker FROM posisi WHERE lot > 0")]
+    symbols = list(dict.fromkeys([cfg.data["data"]["benchmark"], *symbols, *held]))
+
+    results = datamod.update_intraday(conn, symbols, interval)
+    failed = [t for t, n in results.items() if n < 0]
+    bars = sum(n for n in results.values() if n > 0)
+    payload = {"ok": True, "interval": interval, "cakupan": datamod.INTRADAY_LIMITS[interval],
+               "ticker": len(results), "failed": failed, "bars": bars}
+    agent.emit(payload, as_json)
+    if not as_json:
+        console.print(f"[green]{bars:,} bar {interval}[/green] dari {len(results)} ticker "
+                      f"(cakupan maksimum {datamod.INTRADAY_LIMITS[interval]})."
+                      + (f" [red]{len(failed)} gagal.[/red]" if failed else ""))
+        if interval != "60m":
+            console.print("[yellow]Catatan: interval ini hanya menjangkau 60 hari bursa — "
+                          "terlalu pendek untuk menyimpulkan edge. Pakai 60m untuk "
+                          "backtest yang bisa dipercaya.[/yellow]")
+
+
 @data_app.command("status")
 def data_status(home: Optional[Path] = HOME_OPT, as_json: bool = JSON_OPT):
     """Umur data, jumlah emiten, cakupan."""
@@ -330,11 +371,21 @@ def daily(home: Optional[Path] = HOME_OPT, as_json: bool = JSON_OPT,
     if update:
         source = datamod.YahooSource(cfg.data["data"]["rate_limit_per_sec"])
         rows = conn.execute("SELECT ticker FROM emiten WHERE is_active = 1").fetchall()
-        symbols = [cfg.data["data"]["benchmark"]] + [r["ticker"] for r in rows]
+        # Saham yang DIPEGANG wajib ikut, sama seperti `data update` — tanpa ini posisi di
+        # luar tabel emiten (WIDI, BMTR) tidak punya bar baru justru di perintah yang
+        # paling sering dipanggil cron, lalu SL/TP-nya dinilai dari data basi.
+        held = [r["ticker"] for r in conn.execute("SELECT ticker FROM posisi WHERE lot > 0")]
+        symbols = list(dict.fromkeys(
+            [cfg.data["data"]["benchmark"], *(r["ticker"] for r in rows), *held]))
         datamod.update(conn, symbols, source, cfg.data["data"]["history_years"])
 
     mode = "morning" if morning else ("afternoon" if afternoon else "full")
     report = dailymod.build(conn, cfg)
+    # Mode sore = review saja. Dulu `mode` hanya dipakai render teks, jadi agent yang
+    # membaca --json tetap menerima daftar sinyal beli di sore hari.
+    if mode == "afternoon":
+        report["sinyal"] = []
+    report["mode"] = mode
     agent.emit({"ok": True, **report}, as_json)
     if not as_json:
         console.print(dailymod.render_text(report, mode=mode))

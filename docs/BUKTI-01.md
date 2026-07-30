@@ -150,3 +150,63 @@ Membaik 7×. Tetap negatif.
   intraday. Mungkin itu bagian yang membuat v3 berguna di produksi; belum terbukti.
 - Nilai transaksi harian masih estimasi `volume × close` (issue #4), jadi filter
   likuiditasnya aproksimasi.
+
+---
+
+## BUKTI-02 — Panjang MA rezim pasar (2026-07-31)
+
+**Pertanyaan:** MA200 dipakai sebagai filter rezim. Apakah itu terlalu panjang untuk
+horizon perdagangan harian?
+
+**Sumber di luar repo.** [Fidelity](https://www.fidelity.com/viewpoints/active-investor/moving-averages)
+menyebut MA200 sebagai *"a valuable smoothing device when you are trying to assess
+**long-term** trends"*, sementara MA50 *"will more closely follow the recent price
+action"*. Praktik yang lazim dikutip: day trader memakai EMA 9/20 pada bar intraday,
+swing trader 21/50 hari, dan 50/200 hari untuk investor jangka panjang. Jadi secara
+konseptual MA200 pada bar harian memang menilai tren sekuler.
+
+### Temuan 1 — memperpendek MA tidak monoton menambah sinyal
+
+120 hari bursa terakhir, 51 bluechip, 4 strategi:
+
+| MA rezim | Hari bullish | Hari ada sinyal | Total sinyal |
+|---|---|---|---|
+| 200 | 31/120 | 31/120 | 170 |
+| 100 | 9/120 | 9/120 | 60 |
+| 50 | 18/120 | 17/120 | 79 |
+| 20 | 79/120 | 74/120 | 273 |
+
+MA100 justru menghasilkan sinyal **paling sedikit**. Aturan "bearish setelah >10 hari
+beruntun di bawah MA" berinteraksi dengan jalur harga: MA200 sesekali ditembus ke atas
+sehingga streak-nya ter-reset, sedangkan di bawah MA100 IHSG bertahan tanpa putus.
+Intuisi "makin pendek makin banyak sinyal" salah di sini.
+
+### Temuan 2 — backtest tidak pernah menerapkan filter rezim
+
+`screen.scan()` menolak entry saat rezim bearish; `backtest.simulate()` mengambil
+semuanya. Jadi seluruh angka expectancy di BUKTI-01 mengukur strategi yang **tidak pernah
+benar-benar dijalankan**, dan filter rezimnya sendiri tidak pernah teruji — padahal ia
+yang menahan 73% hari bursa. Sudah diperbaiki; angka di bawah memakai filter yang sama
+dengan screening live.
+
+### Temuan 3 — periode terbaik bergantung strategi
+
+| MA rezim | breakout | v3score | mean_reversion |
+|---|---|---|---|
+| 200 | −0,224 | −0,194 | **−0,082** |
+| 50 | −0,219 | **−0,124** | −0,182 |
+| 20 | −0,235 | −0,139 | −0,218 |
+
+- **v3score** — logika dari script harian v3 — membaik jelas di MA50 (−0,194 → −0,124),
+  dengan trade bertambah 523 → 651.
+- **mean_reversion** justru **memburuk 2,2×** saat MA diperpendek. Masuk akal: ia membeli
+  penurunan ekstrem dan bergantung pada tren besar yang masih utuh sebagai jaring pengaman.
+- **breakout** hampir tidak terpengaruh.
+
+**Keputusan:** default `screening.regime_ma_period` diubah 200 → **50**. Menang untuk dua
+dari tiga strategi dan cocok dengan horizon perdagangan harian. Kalau `mean_reversion`
+yang dipakai, kembalikan ke 200.
+
+**Yang tidak berubah:** seluruh angka tetap negatif. Memperpendek MA memperbanyak
+kesempatan bertransaksi, ia tidak menciptakan edge. Idealnya periode ini disetel
+per-strategi, bukan global — belum diimplementasikan.

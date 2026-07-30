@@ -62,7 +62,15 @@ def simulate(
 
     Aturan eksekusi (BT-1): sinyal pada close T dieksekusi pada open T+1 + slippage.
     """
-    entries = strategy.entry_signal(df).to_numpy()
+    entries = strategy.entry_signal(df)
+    # Backtest WAJIB memakai filter yang sama dengan screening live. Sebelumnya tidak:
+    # `screen.scan()` menolak entry saat rezim bearish, sementara `simulate()` mengambil
+    # semuanya. Akibatnya expectancy yang dilaporkan menggambarkan strategi yang tidak
+    # pernah benar-benar dijalankan siapa pun, dan filter rezimnya sendiri tidak pernah
+    # terukur — padahal ia yang menahan 73% hari bursa.
+    if cfg.data["screening"].get("market_regime_filter", True) and "bullish" in df.columns:
+        entries = entries & df["bullish"].astype(bool)
+    entries = entries.to_numpy()
     exits = strategy.exit_signal(df).to_numpy()
     open_, high, low, close = (df[c].to_numpy(dtype=float) for c in ("open", "high", "low", "close"))
     dates = [d.date() for d in df.index]
@@ -101,7 +109,10 @@ def simulate(
         lots = max(int(cfg.modal * cfg.risk_pct // (risk * market.LOT)), 1)
 
         exit_i, exit_price, reason = None, None, ""
+        peak_high = -np.inf  # tertinggi sejak entry — dipakai time stop di bawah
         for j in range(exec_i, size):
+            if np.isfinite(high[j]):
+                peak_high = max(peak_high, high[j])
             if low[j] <= stop:
                 # Gap melewati SL → eksekusi di open, bukan di harga SL.
                 exit_price = min(open_[j], stop) if open_[j] < stop else stop
@@ -112,7 +123,10 @@ def simulate(
                 if j + 1 >= size:
                     break
                 exit_price, exit_i, reason = open_[j + 1], j + 1, "EXIT_SIGNAL"
-            elif j - exec_i >= time_stop_days and high[j] < entry + risk:
+            # "belum mencapai 1R" = tidak pernah menyentuhnya sejak entry. Dulu dicek
+            # `high[j] < entry + risk`, yaitu bar hari itu saja — trade yang sempat +3R
+            # lalu balik turun tetap di-TIME_STOP seolah tak pernah bergerak.
+            elif j - exec_i >= time_stop_days and peak_high < entry + risk:
                 if j + 1 >= size:
                     break
                 exit_price, exit_i, reason = open_[j + 1], j + 1, "TIME_STOP"

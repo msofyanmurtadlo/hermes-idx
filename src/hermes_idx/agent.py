@@ -81,6 +81,17 @@ INTENTS = [
      "command": "backtest --strategy {strategy} --json"},
     {"ucapan": ["update data"], "command": "data update --json"},
     {"ucapan": ["gimana performa trading saya"], "command": "port stats --json"},
+    {"ucapan": ["laporan pagi", "rekomendasi hari ini", "saham apa yang paling siap",
+                "kasih peringkat dong"],
+     "command": "daily --morning --json"},
+    {"ucapan": ["laporan sore", "review porto hari ini", "gimana porto saya hari ini"],
+     "command": "daily --afternoon --json"},
+    {"ucapan": ["strategi mana yang paling bagus", "adu strategi", "ada edge nggak"],
+     "command": "compare --json"},
+    {"ucapan": ["setel stop loss BBCA", "ubah TP BBCA", "atur SL dan TP"],
+     "command": "port plan {ticker} --sl {harga} --tp1 {harga} --json"},
+    {"ucapan": ["ambil data per jam", "data intraday"],
+     "command": "data intraday --interval 60m --json"},
 ]
 
 COMMANDS = [
@@ -103,9 +114,39 @@ COMMANDS = [
      "args": ["--strategy", "--json"], "returns": "metrics + p_value + unfilled_ara"},
     {"name": "data update", "desc": "Update OHLCV incremental.",
      "args": ["--full", "--json"], "returns": "jumlah bar per ticker"},
+    {"name": "data intraday", "desc": "Ambil bar intraday. 60m menjangkau ~3 tahun; "
+                                      "5m/15m/30m hanya 60 hari bursa.",
+     "args": ["--interval", "--tickers", "--json"],
+     "returns": "interval, cakupan, ticker, bars, failed[]"},
+    {"name": "daily", "desc": "Laporan harian. --morning: porto + peringkat + sinyal beli. "
+                              "--afternoon: review porto saja, tanpa rekomendasi beli.",
+     "args": ["--morning", "--afternoon", "--update", "--json"],
+     "returns": "pasar, posisi[], aksi[], saran_rencana[], sinyal[], peringkat[], "
+                "edge{}, peringatan[]"},
+    {"name": "compare", "desc": "Adu semua strategi pada universe, periode, dan biaya sama. "
+                                "Peringkat pakai expectancy, BUKAN win rate.",
+     "args": ["--strategy", "--json"],
+     "returns": "winner, explanation, ranking[] dengan metrics + p_value + verdict"},
+    {"name": "port plan", "desc": "Setel/ubah SL & TP posisi berjalan.",
+     "args": ["ticker", "--sl", "--tp1", "--tp2", "--json"], "returns": "status"},
     {"name": "doctor", "desc": "Diagnostik instalasi & koneksi agent.",
      "args": ["--json"], "returns": "checks[]"},
 ]
+
+MANIFEST_NOTES = {
+    "peringkat_vs_sinyal": (
+        "`peringkat[]` SELALU berisi (5 teratas menurut kesiapan) dan bukan ajakan beli; "
+        "`sinyal[]` hanya berisi yang lolos seluruh ambang dan sering kosong. Jangan "
+        "menyajikan isi `peringkat[]` kepada pengguna seolah-olah rekomendasi beli — "
+        "label PELUANG/AMATI/PANTAU beserta `alasan` wajib ikut disebut."
+    ),
+    "edge_belum_terbukti": (
+        "Selama `strategi_terbukti` kosong, tidak ada strategi dengan expectancy positif "
+        "yang signifikan. Sampaikan itu apa adanya sebelum menyebut sinyal apa pun."
+    ),
+}
+"""Aturan penyajian yang tidak bisa disimpulkan dari daftar perintah saja — dua field
+paling mudah disalahartikan agent, dan salah tafsirnya berujung ke uang pengguna."""
 
 
 def manifest() -> dict:
@@ -120,6 +161,7 @@ def manifest() -> dict:
         "behavior_rules": BEHAVIOR_RULES,
         "intents": INTENTS,
         "commands": COMMANDS,
+        "notes": MANIFEST_NOTES,
         "non_goals": [
             "Tidak mengeksekusi order. Ini bukan bot auto-trading.",
             "Tidak mengakses API internal Stockbit dalam bentuk apa pun.",

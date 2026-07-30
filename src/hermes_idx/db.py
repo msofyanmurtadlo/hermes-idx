@@ -82,8 +82,24 @@ CREATE TABLE IF NOT EXISTS backtest_result (
     params_json TEXT, warnings TEXT
 );
 
+CREATE TABLE IF NOT EXISTS ohlcv_intraday (
+    ticker TEXT NOT NULL, ts TIMESTAMP NOT NULL, interval TEXT NOT NULL,
+    open REAL, high REAL, low REAL, close REAL, volume INTEGER,
+    source TEXT, fetched_at TIMESTAMP,
+    PRIMARY KEY (ticker, ts, interval)
+);
+CREATE INDEX IF NOT EXISTS idx_intraday_lookup ON ohlcv_intraday(ticker, interval, ts);
+
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 """
+"""Tabel `ohlcv_intraday` sengaja terpisah dari `ohlcv`, bukan menambah kolom `interval`
+ke sana. Bar harian dan bar intraday punya sifat berbeda: yang harian permanen dan
+lengkap sejak 5 tahun lalu, yang intraday hanya tersedia 60 hari terakhir (5m/15m) atau
+730 hari (60m) dan terus digeser ke belakang oleh Yahoo. Mencampurnya akan membuat
+setiap query harian harus menyaring interval, dan sekali lupa hasilnya salah diam-diam.
+
+Penambahan tabel bersifat aditif, jadi SCHEMA_VERSION tidak dinaikkan — database lama
+mendapat tabel ini otomatis saat `connect()` berikutnya tanpa perlu migrasi."""
 
 
 def connect(path: str | Path) -> sqlite3.Connection:

@@ -49,16 +49,36 @@ class MarketContext:
     """False bila data IHSG tidak ada. Rezim di-anggap TIDAK bullish (fail-closed)."""
 
 
-def build_context(benchmark: pd.DataFrame | None) -> MarketContext:
+def build_context(benchmark: pd.DataFrame | None, ma_period: int = 200,
+                  below_days: int = 10) -> MarketContext:
+    """Rezim pasar dari posisi IHSG terhadap rata-rata bergeraknya.
+
+    `ma_period` sengaja bisa diatur karena panjangnya harus cocok dengan horizon
+    perdagangan, dan 200 hari BUKAN pilihan netral. Fidelity menyebut MA200 sebagai
+    "smoothing device when you are trying to assess long-term trends", sementara MA50
+    "more closely follows the recent price action". Praktik yang lazim: day trader
+    memakai EMA 9/20 pada bar intraday, swing trader 21/50 hari, dan 50/200 hari untuk
+    investor jangka panjang.
+
+    Artinya filter MA200 pada bar harian menilai tren SEKULER. Dipakai untuk trading
+    harian, ia menahan sinyal berbulan-bulan hanya karena pasar belum pulih dari koreksi
+    besar — diukur pada data ini: 32 dari 120 hari bursa yang lolos. Itu bukan bug, tapi
+    juga bukan alat yang tepat untuk horizon pendek.
+
+    Yang TIDAK berubah: memperpendek periode memperbanyak sinyal, bukan menciptakan edge.
+    Lihat `docs/BUKTI-01.md` untuk angka expectancy pada tiap periode.
+    """
     if benchmark is None or benchmark.empty:
         # Fail-closed, mengikuti script v3: kalau IHSG tidak bisa dicek, tahan BELI.
         # Menganggap pasar bullish saat datanya hilang adalah arah kegagalan yang salah.
         return MarketContext(available=False)
+    if ma_period < 2:
+        raise ValueError(f"periode MA rezim harus >= 2, diberi {ma_period}")
     close = benchmark["close"]
-    above = close > ind.sma(close, 200)
-    # SE-2: rezim dinyatakan bearish bila IHSG di bawah MA200 selama > 10 hari beruntun.
+    above = close > ind.sma(close, ma_period)
+    # SE-2: rezim bearish bila IHSG di bawah MA selama > `below_days` hari beruntun.
     below_streak = (~above).astype(int).groupby((above != above.shift()).cumsum()).cumsum()
-    bullish = ~(below_streak > 10)
+    bullish = ~(below_streak > below_days)
     return MarketContext(benchmark_close=close, bullish_regime=bullish)
 
 

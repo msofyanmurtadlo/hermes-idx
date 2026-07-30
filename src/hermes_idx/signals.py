@@ -135,9 +135,17 @@ def _setup_quality(df: pd.DataFrame, i: int) -> float:
 
 
 def _liquidity_score(avg_value: float, minimum: float) -> float:
+    """Skor likuiditas pada skala log — beda Rp2 M vs Rp4 M jauh lebih berarti
+    daripada Rp200 M vs Rp202 M.
+
+    `minimum` dijaga > 0: mematikan filter likuiditas (`min_avg_value_20d: 0`) adalah
+    config yang sah, tapi dulu membuat `log10(0)` melempar ValueError dan menjatuhkan
+    seluruh screening.
+    """
     if not np.isfinite(avg_value) or avg_value <= 0:
         return 0.0
-    return _norm(math.log10(avg_value), math.log10(max(minimum, 1)), math.log10(minimum * 50))
+    floor = max(float(minimum), 1.0)
+    return _norm(math.log10(avg_value), math.log10(floor), math.log10(floor * 50))
 
 
 # --------------------------------------------------------------------------- builder

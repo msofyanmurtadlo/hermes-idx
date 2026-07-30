@@ -15,9 +15,12 @@ import datetime as dt
 import json
 import subprocess
 
-from . import data as datamod, portfolio, screen, universe
+from . import data as datamod, market, portfolio, screen, universe
 
 URGENCY_ORDER = {"SEGERA": 0, "HARI INI": 1, "AMATI": 2}
+
+BADGE = {"PELUANG": "🟢", "AMATI": "🟡", "PANTAU": "⚪"}
+"""Label peringkat harian — lihat `screen.rank()` untuk definisi tiap tingkat."""
 
 
 def fetch_live_prices(tickers: list[str]) -> dict[str, dict]:
@@ -64,7 +67,9 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
         "pasar": {},
         "posisi": [],
         "aksi": [],
+        "saran_rencana": [],
         "sinyal": [],
+        "peringkat": [],
         "edge": {},
     }
 
@@ -90,11 +95,11 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
     # Ambil harga live untuk semua ticker porto + IHSG (1 request batch)
     positions = portfolio.positions(conn)
     live_tickers = [pos.ticker for pos in positions]
-    bench_sym = cfg.data["data"]["benchmark"]  # "^JKSE"
-    # TradingView pakai "IDX:COMPOSITE" untuk IHSG
-    tv_bench = "IDX:COMPOSITE"
-    all_live = fetch_live_prices(live_tickers)
-    bench_live = fetch_live_prices(["COMPOSITE"])
+    # TradingView pakai simbol "COMPOSITE" untuk IHSG. Satu request untuk porto + IHSG
+    # sekaligus — API-nya batch, dulu dipanggil dua kali tanpa alasan.
+    live_all = fetch_live_prices([*live_tickers, "COMPOSITE"])
+    all_live = {t: v for t, v in live_all.items() if t != "COMPOSITE"}
+    bench_live = {"COMPOSITE": live_all["COMPOSITE"]} if "COMPOSITE" in live_all else {}
     live_bench_price = bench_live.get("COMPOSITE", {}).get("price")
     live_bench_chg = bench_live.get("COMPOSITE", {}).get("chg_pct")
 
@@ -109,21 +114,23 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
         if live_bench_price:
             last = live_bench_price
             chg = live_bench_chg or 0.0
-            live_label = " (live)"
         else:
             last = float(benchmark["close"].iloc[-1])
             prev = float(benchmark["close"].iloc[-2]) if len(benchmark) > 1 else last
             chg = round((last / prev - 1) * 100, 2) if prev else 0.0
-            live_label = ""
         bullish = bool(ctx.bullish_regime.iloc[-1]) if ctx.bullish_regime is not None else False
+        # Periode MA disebut apa adanya, tidak dipatok "200": sejak periodenya bisa
+        # diatur, label yang salah menyesatkan justru soal dasar keputusannya.
+        ma = int(cfg.data["screening"].get("regime_ma_period", 200))
         report["pasar"] = {
             "tersedia": True,
             "ihsg": round(last, 2),
             "perubahan_pct": round(chg, 2),
             "bullish": bullish,
             "live": bool(live_bench_price),
-            "catatan": "IHSG di atas MA200" if bullish else
-                       "IHSG di bawah MA200 — strategi long-only ditahan",
+            "regime_ma_period": ma,
+            "catatan": f"IHSG di atas MA{ma}" if bullish else
+                       f"IHSG di bawah MA{ma} — strategi long-only ditahan",
         }
 
     # --- posisi & aksi (paling mendesak duluan) -----------------------------
@@ -140,9 +147,12 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
         elif not frame.empty:
             last = float(frame["close"].iloc[-1])
         else:
+            # Rencana (SL/TP) tetap disertakan walau harga tidak ada — tanpa ini posisi
+            # tak terpantau juga lolos dari pemeriksaan kewajaran TP di bawah.
             report["posisi"].append({
                 "ticker": pos.ticker, "lot": pos.lot, "avg_price": pos.avg_price,
-                "stop_loss": pos.stop_loss, "tanpa_sl": pos.stop_loss is None,
+                "stop_loss": pos.stop_loss, "tp1": pos.tp1, "tp2": pos.tp2,
+                "tanpa_sl": pos.stop_loss is None,
                 "sektor": universe.sector_of(pos.ticker),
                 "error": "tidak ada data harga",
             })
@@ -161,7 +171,11 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
         tp2_dist = round((tp2 - last) / last * 100, 1) if tp2 else None
         # Review aksi tetap pakai frame DB (butuh history indikator)
         if not frame.empty:
-            action = portfolio.review(pos, frame, cfg, now.date())
+            saran = portfolio.plan_advice(pos, frame, cfg, last if live else None)
+            if saran:
+                report["saran_rencana"].append(saran)
+            action = portfolio.review(pos, frame, cfg, now.date(),
+                                      last_price=last if live else None)
             if action.action != "HOLD":
                 report["aksi"].append({
                     "ticker": action.ticker, "aksi": action.action, "urgensi": action.urgency,
@@ -176,6 +190,24 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
             "tanpa_sl": sl is None, "live": bool(live),
             "sektor": universe.sector_of(pos.ticker),
         })
+
+    # Sanity porto — angka mustahil harus diteriakkan, bukan dirender rapi. Impor legacy
+    # sempat menaruh WIDI dengan avg_price 1,1 (di bawah harga minimum bursa 50) sehingga
+    # laporan memamerkan "P/L +2.263%", dan BMTR dengan TP1 di BAWAH harga beli.
+    for pos_row in report["posisi"]:
+        avg = pos_row.get("avg_price") or 0
+        if 0 < avg < market.HARGA_MIN:
+            report["peringatan"].append(
+                f"{pos_row['ticker']}: harga beli tercatat {avg:,.2f}, di bawah harga "
+                f"minimum bursa Rp{market.HARGA_MIN}. Hampir pasti salah impor — P/L-nya "
+                f"tidak bisa dipercaya. Perbaiki dengan `port add`/`port plan`."
+            )
+        tp1_row = pos_row.get("tp1")
+        if tp1_row and avg and tp1_row <= avg:
+            report["peringatan"].append(
+                f"{pos_row['ticker']}: TP1 {tp1_row:,.0f} berada di bawah harga beli "
+                f"{avg:,.0f} — kena target justru rugi. Setel ulang lewat `port plan`."
+            )
 
     report["aksi"].sort(key=lambda a: URGENCY_ORDER.get(a["urgensi"], 9))
     max_open = int(cfg.data["akun"]["max_open_positions"])
@@ -235,6 +267,12 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
         report["sinyal"] = [s.as_row() for s in signals]
     except Exception as exc:  # noqa: BLE001 — laporan harus tetap terbit
         report["peringatan"].append(f"Screening gagal: {exc}")
+
+    # --- peringkat: selalu ada isi, walau tidak ada yang layak dibeli ---------
+    try:
+        report["peringkat"], _ = screen.rank(conn, cfg, top=5)
+    except Exception as exc:  # noqa: BLE001
+        report["peringatan"].append(f"Peringkat gagal: {exc}")
 
     report["tidak_ada_sinyal_itu_normal"] = not report["sinyal"]
     return report
@@ -319,6 +357,23 @@ def render_text(report: dict, mode: str = "full") -> str:
             lines.append(f"   _{act['alasan']}_")
     lines.append("")
 
+    # --- Saran ubah rencana (SL/TP posisi berjalan) ---
+    if report.get("saran_rencana"):
+        lines.append("*🛠 SARAN UBAH SL/TP*")
+        for saran in report["saran_rencana"]:
+            bagian = []
+            if "stop_loss_baru" in saran:
+                lama = f"{saran['stop_loss_lama']:,.0f}" if saran.get("stop_loss_lama") else "—"
+                bagian.append(f"SL {lama} → *{saran['stop_loss_baru']:,.0f}*")
+            if "tp1_baru" in saran:
+                lama = f"{saran['tp1_lama']:,.0f}" if saran.get("tp1_lama") else "—"
+                bagian.append(f"TP1 {lama} → *{saran['tp1_baru']:,.0f}*")
+            lines.append(f"• *{saran['ticker']}* — {' | '.join(bagian)}")
+            for alasan in saran["alasan"]:
+                lines.append(f"   _{alasan}_")
+            lines.append(f"   `{saran['perintah']}`")
+        lines.append("")
+
     # --- Sinyal Beli (pagi & full saja; sore = review tanpa rekomendasi) ---
     if show_sinyal:
         lines.append("*🔍 SINYAL BELI*")
@@ -335,6 +390,23 @@ def render_text(report: dict, mode: str = "full") -> str:
                 )
                 lines.append(f"   _{sig['notes']}_")
         lines.append("")
+
+        # Peringkat selalu tampil — inilah "tiap pagi ada isinya". Bedanya dengan
+        # SINYAL BELI di atas: ini urutan kesiapan, bukan daftar yang boleh dibeli.
+        if report.get("peringkat"):
+            lines.append("*📋 PERINGKAT HARI INI*")
+            for n, row in enumerate(report["peringkat"], 1):
+                lines.append(
+                    f"{n}. {BADGE.get(row['label'], '')} *{row['ticker']}* "
+                    f"skor {row['score']:.0f} · {row['label']}"
+                )
+                lines.append(
+                    f"   Entry {row['entry_price']:,} | SL {row['stop_loss']:,} | "
+                    f"TP {row['tp1']:,} | {row['position_lot']} lot"
+                )
+                lines.append(f"   _{row['alasan']}_")
+            lines.append("_Peringkat = urutan kesiapan, BUKAN ajakan beli._")
+            lines.append("")
 
     # --- Peringatan (di bawah, bukan di atas — biar nggak nutupin info utama) ---
     if report["peringatan"]:

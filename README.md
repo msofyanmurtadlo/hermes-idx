@@ -27,6 +27,80 @@ hermes-idx compare          # adu strategi — LAKUKAN INI DULU
 hermes-idx scan             # sinyal hari ini
 ```
 
+---
+
+## Baru pertama kali? Mulai dari sini
+
+Lima perintah, urut. Jangan dilompati — masing-masing menyiapkan yang berikutnya.
+
+| # | Perintah | Yang terjadi | Lama |
+|---|---|---|---|
+| 1 | `hermes-idx init` | Membuat file konfigurasi & database di `~/.hermes-idx/` | seketika |
+| 2 | `hermes-idx data seed-bluechip` | Mengisi daftar 51 emiten bluechip pilihan | seketika |
+| 3 | `hermes-idx data update` | Mengunduh harga harian 5 tahun ke belakang | 10–30 menit |
+| 4 | `hermes-idx compare` | Menguji semua strategi pada data itu, lalu memberi vonis | 5–15 menit |
+| 5 | `hermes-idx daily --morning` | Laporan: porto, aksi, peringkat harian | ~1 menit |
+
+Sebelum memakai uang sungguhan, atur modal Anda dulu:
+
+```bash
+hermes-idx config akun.modal 10000000          # modal Anda, dalam rupiah
+hermes-idx config akun.risk_per_trade_pct 1    # rugi maksimum per transaksi (% modal)
+hermes-idx config akun.max_open_positions 4    # berapa saham dipegang bersamaan
+```
+
+### Membaca laporannya
+
+Laporan pagi punya dua bagian yang sering tertukar. Bedanya penting:
+
+- **🔍 SINYAL BELI** — daftar yang *lolos semua ambang*. Sering kosong, dan itu normal:
+  pada 120 hari bursa terakhir hanya 27% hari yang punya isi. Kosong berarti sistem
+  menahan diri, bukan rusak.
+- **📋 PERINGKAT HARI INI** — *selalu* berisi 5 teratas, diurutkan menurut kesiapan.
+  Ini menjawab "kalau harus memilih, mana yang paling siap", bukan "mana yang boleh
+  dibeli". Tiap baris diberi label:
+
+  | Label | Arti |
+  |---|---|
+  | 🟢 **PELUANG** | Trigger nyala, rezim pasar mendukung, skor lolos, slot porto ada |
+  | 🟡 **AMATI** | Setup terbentuk tapi ada yang mengganjal (alasannya ditulis) |
+  | ⚪ **PANTAU** | Belum ada trigger; levelnya sekadar ancang-ancang |
+
+### Istilah yang dipakai
+
+| Istilah | Artinya dalam bahasa sehari-hari |
+|---|---|
+| **SL** (stop loss) | Harga jual paksa kalau rugi. Batas kerugian yang Anda terima di muka. |
+| **TP** (take profit) | Harga jual saat untung. TP1 sebagian, TP2 sisanya. |
+| **Lot** | Satuan beli di IDX. 1 lot = 100 lembar. |
+| **R** | Satu satuan risiko = jarak entry ke SL. Untung "+2R" = dua kali risiko awal. |
+| **Expectancy** | Rata-rata untung/rugi per transaksi, dalam R. **Negatif = strategi merugi.** |
+| **Win rate** | Persentase transaksi yang untung. Bisa tinggi tapi tetap rugi — lihat bawah. |
+| **Rezim pasar** | Bullish kalau IHSG di atas rata-rata 200 hari; bearish kalau di bawah. |
+| **Slippage** | Selisih harga yang Anda niatkan dengan yang benar-benar terjadi. |
+
+### Laporan otomatis tiap hari
+
+Di Android, dua laporan bisa jalan sendiri tanpa Anda buka HP:
+
+```cron
+30 7  * * 1-5 ~/hermes-idx/scripts/hermes-idx-report.sh pagi   # sebelum bursa buka
+30 16 * * 1-5 ~/hermes-idx/scripts/hermes-idx-report.sh sore   # setelah bursa tutup
+```
+
+Pagi memberi porto + peringkat + saran beli; sore hanya review posisi, tanpa rekomendasi
+beli — supaya tidak memancing transaksi di jam yang salah. Hasilnya ditulis ke
+`~/.hermes-idx/laporan/terbaru-pagi.txt` dan `terbaru-sore.txt`.
+
+Langkah lengkap termasuk cara mengujinya ada di [`docs/TERMUX.md`](docs/TERMUX.md).
+
+### Kalau ada yang tidak beres
+
+```bash
+hermes-idx doctor              # periksa semuanya: modul, data, database, koneksi agent
+cat ~/.hermes-idx/laporan/cron.log   # kenapa laporan terjadwal gagal
+```
+
 Sambungkan ke Hermes agent:
 
 ```bash
@@ -106,6 +180,12 @@ di-*skip*, bukan dipaksakan.
 **Biaya transaksi dihitung, selalu.** Fee beli, fee jual + PPh final, dan slippage masuk ke
 semua kalkulasi P/L dan backtest. Tanpa ini backtest overestimate secara sistematis.
 
+**Data intraday tersedia, dengan batasnya diumumkan.** `hermes-idx data intraday
+--interval 60m` mengambil ~3 tahun bar 1 jam (249.720 bar untuk 52 emiten). Interval
+lebih kecil juga bisa (`5m`, `15m`, `30m`) tapi Yahoo hanya menyimpan **60 hari bursa**
+untuk itu — satu rezim pasar saja, terlalu pendek untuk menyimpulkan edge. Perintahnya
+mengatakan itu setiap kali dipakai, bukan menyembunyikannya di dokumentasi.
+
 **Jalan di HP.** Target utamanya Termux di Android — tanpa root, tanpa build tool berat,
 tanpa TA-Lib. Semua indikator harus bisa ditulis dengan numpy/pandas murni.
 
@@ -148,9 +228,13 @@ Yang paling dibutuhkan sekarang — semua ada di [Issues](../../issues):
   T+1-nya kena ARA. Yang belum ada: **isi tabel rezim sebelum 2023**, termasuk periode ARB
   asimetris. Tanpa itu backtest periode lama memakai aturan hari ini. Ini riset peraturan,
   bukan coding — cocok untuk kontributor pertama.
-- **Sumber nilai transaksi harian (Rp)** (#4). Yahoo hanya memberi volume lembar; sekarang
-  `value` diestimasi `volume × close` dan ditandai ke user. Filter likuiditas seluruh sistem
-  bertumpu pada angka estimasi ini.
+- **Sumber nilai transaksi harian (Rp)** (#4). Yahoo hanya memberi volume lembar, jadi
+  `value` diestimasi `volume × harga tipikal (H+L+C)/3`. Dua jalan buntu yang sudah
+  dicoba, supaya tidak diulang: **API resmi IDX** diblokir Cloudflare (HTTP 403), dan
+  kolom **`Value.Traded` TradingView ternyata bukan data independen** — pada BBCA nilainya
+  persis `6.450 × 152.663.200`, sama sampai digit terakhir dengan estimasi close × volume.
+  Peringatan estimasi sekarang hanya muncul untuk emiten yang duduk dalam ±25% dari ambang
+  likuiditas, karena hanya di situ selisihnya bisa membalik keputusan.
 - **Daftar emiten IDX otomatis.** Sekarang masih perlu `data seed` dari CSV manual.
 - **Penyesuaian corporate action.** Split/dividen belum ditangani — gap harganya bisa
   memicu sinyal palsu.

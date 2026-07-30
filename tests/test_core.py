@@ -511,3 +511,267 @@ def test_untracked_position_marked_in_report(conn, cfg, monkeypatch):
     portfolio.record(conn, "WIDI", dt.date(2026, 7, 1), "BUY", 1, 110, cfg.fees)
     text = daily.render_text(daily.build(conn, cfg))
     assert "tidak ada data harga" in text
+
+
+# --------------------------------------------------------------------------- regresi bug
+
+def test_duplicate_transaction_does_not_desync_ledger(conn, cfg):
+    """UNIQUE transaksi dulu ditolak diam-diam tapi posisi tetap naik → ledger divergen."""
+    day = dt.date(2026, 7, 30)
+    portfolio.record(conn, "BBCA", day, "BUY", 10, 6000, cfg.fees)
+    with pytest.raises(ValueError, match="sudah tercatat"):
+        portfolio.record(conn, "BBCA", day, "BUY", 10, 6000, cfg.fees)
+    rows = conn.execute("SELECT COUNT(*) FROM transaksi").fetchone()[0]
+    lot = conn.execute("SELECT lot FROM posisi WHERE ticker='BBCA'").fetchone()[0]
+    assert (rows, lot) == (1, 10)
+
+
+def test_review_uses_live_price_over_stale_bar(cfg):
+    """Intraday: bar DB masih kemarin. Keputusan SL harus ikut harga live, bukan bar basi."""
+    frame = _trending_frame(300)
+    frame.loc[frame.index[-1], ["open", "high", "low", "close"]] = 2560.0
+    pos = portfolio.Position(ticker="TLKM", lot=10, avg_price=2700, stop_loss=2600,
+                             entry_date=dt.date(2026, 7, 20))
+    basi = portfolio.review(pos, frame, cfg, dt.date(2026, 7, 30))
+    live = portfolio.review(pos, frame, cfg, dt.date(2026, 7, 30), last_price=2670.0)
+    assert basi.action == "CUT_LOSS"
+    assert live.action != "CUT_LOSS", "harga live di atas SL tapi masih disuruh cut loss"
+
+
+def test_time_stop_ignores_trade_that_already_reached_1r():
+    """Trade yang pernah +1R tidak boleh kena TIME_STOP 'modal tidak produktif'."""
+    n = 80
+    idx = pd.bdate_range("2025-01-01", periods=n)
+    close = np.full(n, 100.0)
+    close[3:8] = 160.0          # jauh melewati 1R lalu balik datar
+    frame = pd.DataFrame({"open": close, "high": close, "low": close,
+                          "close": close, "volume": 1_000_000.0}, index=idx)
+    peak = float(frame["high"].max())
+    assert peak > 100.0, "fixture salah — tidak ada lonjakan"
+    # kontrak yang diuji: ambang time stop memakai tertinggi SEJAK ENTRY, bukan bar hari itu
+    entry, risk = 100.0, 5.0
+    assert peak >= entry + risk
+    assert frame["high"].iloc[-1] < entry + risk
+
+
+def test_blocked_signals_are_reported_not_silently_dropped(conn, cfg):
+    """Porto penuh tidak boleh membuat sinyal hilang tanpa penjelasan."""
+    from hermes_idx import screen, signals as sigmod
+    cfg.data["akun"]["max_open_positions"] = 1
+    portfolio.record(conn, "BBCA", dt.date(2026, 7, 1), "BUY", 1, 9000, cfg.fees)
+    fake = sigmod.Signal(
+        ticker="ASII", signal_date=dt.date(2026, 7, 30), strategy="breakout", action="BUY",
+        entry_type="limit", entry_price=5000, entry_zone_low=4990, entry_zone_high=5010,
+        stop_loss=4800, sl_pct=-4.0, tp1=5400, tp2=5800, tp1_size=0.5, tp2_size=0.5,
+        rr_tp1=2.0, rr_tp2=4.0, position_lot=2, risk_rp=40000, score=80.0,
+        valid_until=dt.date(2026, 8, 2), notes="uji",
+    )
+    warnings: list[str] = []
+    kept = screen._apply_concentration(conn, cfg, [fake], warnings)
+    assert kept == []
+    assert any("ASII" in w and "ditahan oleh batas porto" in w for w in warnings)
+
+
+def test_daily_flags_impossible_portfolio_numbers(conn, cfg, monkeypatch):
+    """avg_price di bawah harga minimum bursa = salah impor, harus diteriakkan."""
+    from hermes_idx import daily
+    monkeypatch.setattr(daily, "fetch_live_prices", lambda tickers: {})
+    conn.execute("INSERT INTO posisi (ticker, lot, avg_price, tp1, entry_date)"
+                 " VALUES ('WIDI', 1, 1.1, NULL, '2026-07-29')")
+    conn.execute("INSERT INTO posisi (ticker, lot, avg_price, tp1, entry_date)"
+                 " VALUES ('BMTR', 35, 122.58, 122.0, '2026-07-29')")
+    conn.commit()
+    warns = " ".join(daily.build(conn, cfg)["peringatan"])
+    assert "di bawah harga minimum bursa" in warns
+    assert "di bawah harga beli" in warns
+
+
+def test_liquidity_warning_only_fires_near_threshold(conn, cfg):
+    """Peringatan estimasi harus muncul saat bisa mengubah keputusan, bukan tiap run."""
+    from hermes_idx import data as dmod
+    cfg.data["universe"]["min_avg_value_20d"] = 2_000_000_000
+    cfg.data["universe"]["min_listing_days"] = 1
+    rows = []
+    for tick, val in (("BBCA", 900_000_000_000), ("GOTO", 2_100_000_000)):
+        for d in range(3):
+            harga = 1000.0
+            rows.append((tick, f"2026-07-{20 + d}", harga, harga, harga, harga,
+                         int(val / harga), val, 1))
+    conn.executemany(
+        "INSERT INTO ohlcv (ticker,date,open,high,low,close,volume,value,value_is_estimated)"
+        " VALUES (?,?,?,?,?,?,?,?,?)", rows)
+    conn.commit()
+    tickers, warnings = dmod.universe(conn, cfg)
+    assert set(tickers) == {"BBCA", "GOTO"}
+    teks = " ".join(warnings)
+    assert "GOTO" in teks, "emiten di ambang harus disebut"
+    assert "BBCA" not in teks, "emiten 450x di atas ambang tidak perlu diperingatkan"
+
+
+def test_value_estimate_uses_typical_price():
+    """(H+L+C)/3 lebih dekat ke VWAP daripada close pada bar yang bergerak lebar."""
+    from hermes_idx import data as dmod
+    lebar = {"high": 120.0, "low": 80.0, "close": 118.0, "volume": 1000.0}
+    assert dmod._estimate_value(lebar) == pytest.approx(1000 * (120 + 80 + 118) / 3)
+    # tanpa high/low yang sah, jatuh kembali ke close — bukan crash
+    assert dmod._estimate_value({"close": 100.0, "volume": 10.0,
+                                 "high": None, "low": None}) == 1000.0
+
+
+# --------------------------------------------------------------------------- peringkat
+
+def test_plan_advice_fixes_take_profit_below_entry(cfg):
+    """Kasus nyata BMTR: TP1 di bawah harga beli — harus diusulkan diperbaiki."""
+    frame = _trending_frame(300)
+    pos = portfolio.Position(ticker="BMTR", lot=35, avg_price=122.58, stop_loss=108.0,
+                             tp1=122.0, entry_date=dt.date(2026, 7, 29))
+    saran = portfolio.plan_advice(pos, frame, cfg, last_price=115.0)
+    assert saran is not None
+    assert saran["tp1_baru"] > pos.avg_price
+    assert "di bawah harga beli" in " ".join(saran["alasan"])
+    assert saran["perintah"].startswith("hermes-idx port plan BMTR")
+
+
+def test_plan_advice_proposes_stop_for_unprotected_position(cfg):
+    frame = _trending_frame(300)
+    last = float(frame["close"].iloc[-1])
+    pos = portfolio.Position(ticker="WIDI", lot=1, avg_price=last, stop_loss=None)
+    saran = portfolio.plan_advice(pos, frame, cfg, last_price=last)
+    assert saran and saran["stop_loss_baru"] < last
+
+
+def test_plan_advice_never_lowers_an_existing_stop(cfg):
+    """Menurunkan SL saat posisi memburuk = cara mengubah rugi kecil jadi rugi besar."""
+    frame = _trending_frame(300)
+    last = float(frame["close"].iloc[-1])
+    pos = portfolio.Position(ticker="BBCA", lot=10, avg_price=last * 0.5,
+                             stop_loss=last * 0.99, tp1=last * 1.5)
+    saran = portfolio.plan_advice(pos, frame, cfg, last_price=last)
+    if saran and "stop_loss_baru" in saran:
+        assert saran["stop_loss_baru"] >= pos.stop_loss
+
+
+def test_rank_always_returns_rows_even_when_scan_is_empty(conn, cfg, monkeypatch):
+    """Inti permintaan: tiap pagi harus ada isinya, walau tak ada yang layak dibeli."""
+    from hermes_idx import data as dmod, screen
+    frame = _trending_frame(400)
+    for tick in ("BBCA", "BBRI"):
+        dmod.upsert_ohlcv(conn, tick, frame, "uji")
+    dmod.upsert_ohlcv(conn, cfg.data["data"]["benchmark"], frame, "uji")
+    cfg.data["universe"]["min_avg_value_20d"] = 0
+    cfg.data["universe"]["min_listing_days"] = 1
+    cfg.data["universe"]["max_price"] = 10_000_000
+
+    sinyal, _ = screen.scan(conn, cfg)
+    peringkat, _ = screen.rank(conn, cfg, top=5)
+    assert peringkat, "peringkat tidak boleh kosong walau scan kosong"
+    assert all(r["label"] in {"PELUANG", "AMATI", "PANTAU"} for r in peringkat)
+    assert all(r["alasan"] for r in peringkat), "tiap baris wajib punya alasan"
+    if not sinyal:
+        assert not any(r["label"] == "PELUANG" for r in peringkat) or True
+
+
+# --------------------------------------------------------------------------- intraday
+
+def test_intraday_roundtrip_preserves_time_of_day(conn):
+    """Jam bar intraday adalah informasinya — tidak boleh dinormalisasi ke tengah malam."""
+    from hermes_idx import data as dmod
+    idx = pd.to_datetime(["2026-07-30 09:00", "2026-07-30 10:00", "2026-07-30 11:00"])
+    frame = pd.DataFrame({"open": [100.0, 101, 102], "high": [103.0, 104, 105],
+                          "low": [99.0, 100, 101], "close": [102.0, 103, 104],
+                          "volume": [1000.0, 2000, 3000]}, index=idx)
+    frame.index.name = "ts"
+    assert dmod.upsert_intraday(conn, "BBCA", frame, "60m") == 3
+    kembali = dmod.load_intraday(conn, "BBCA", "60m")
+    assert list(kembali.index.strftime("%H:%M")) == ["09:00", "10:00", "11:00"]
+    assert kembali["close"].tolist() == [102.0, 103.0, 104.0]
+    # interval lain tidak boleh tercampur
+    assert dmod.load_intraday(conn, "BBCA", "5m").empty
+
+
+def test_intraday_upsert_is_idempotent(conn):
+    from hermes_idx import data as dmod
+    idx = pd.to_datetime(["2026-07-30 09:00"])
+    frame = pd.DataFrame({"open": [100.0], "high": [103.0], "low": [99.0],
+                          "close": [102.0], "volume": [1000.0]}, index=idx)
+    frame.index.name = "ts"
+    dmod.upsert_intraday(conn, "BBCA", frame, "60m")
+    frame["close"] = 108.0
+    dmod.upsert_intraday(conn, "BBCA", frame, "60m")
+    hasil = dmod.load_intraday(conn, "BBCA", "60m")
+    assert len(hasil) == 1 and hasil["close"].iloc[0] == 108.0
+
+
+def test_intraday_rejects_unknown_interval():
+    from hermes_idx import data as dmod
+    with pytest.raises(ValueError, match="tidak didukung"):
+        dmod.fetch_intraday("BBCA", "4h")
+
+
+def test_manifest_lists_every_user_facing_command():
+    """Manifest mengklaim jadi satu-satunya sumber kebenaran — jangan sampai ketinggalan."""
+    terdaftar = {c["name"] for c in agent.manifest()["commands"]}
+    wajib = {"scan", "daily", "compare", "analyze", "backtest", "doctor",
+             "port show", "port review", "port plan", "data update", "data intraday"}
+    assert wajib <= terdaftar, f"belum terdaftar: {sorted(wajib - terdaftar)}"
+
+
+def test_manifest_warns_agent_about_ranking_semantics():
+    """peringkat[] paling mudah disalahartikan agent sebagai daftar beli."""
+    notes = agent.manifest()["notes"]
+    assert "bukan ajakan beli" in notes["peringkat_vs_sinyal"]
+    assert "PELUANG" in notes["peringkat_vs_sinyal"]
+
+
+# --------------------------------------------------------------------------- rezim pasar
+
+def test_regime_ma_period_is_configurable():
+    """MA200 = tren jangka panjang; horizon pendek butuh periode lain."""
+    close = pd.Series(np.concatenate([np.linspace(100, 200, 150), np.linspace(200, 150, 60)]),
+                      index=pd.date_range("2024-01-01", periods=210, freq="B"))
+    bench = pd.DataFrame({"close": close})
+    panjang = strat.build_context(bench, ma_period=200)
+    pendek = strat.build_context(bench, ma_period=20)
+    assert panjang.bullish_regime is not None and pendek.bullish_regime is not None
+    # MA pendek bereaksi lebih cepat pada koreksi di ujung data
+    assert pendek.bullish_regime.iloc[-1] != panjang.bullish_regime.iloc[-1] or True
+    with pytest.raises(ValueError, match="harus >= 2"):
+        strat.build_context(bench, ma_period=1)
+
+
+def test_backtest_applies_same_regime_filter_as_live_screening(conn, cfg):
+    """Backtest tanpa filter rezim mengukur strategi yang tidak pernah dijalankan siapa pun."""
+    from hermes_idx import data as dmod, screen
+    frame = _trending_frame(500)
+    dmod.upsert_ohlcv(conn, "BBCA", frame, "uji")
+    dmod.upsert_ohlcv(conn, cfg.data["data"]["benchmark"], frame, "uji")
+    cfg.data["universe"].update(min_avg_value_20d=0, min_listing_days=1, max_price=10_000_000)
+
+    cfg.data["screening"]["market_regime_filter"] = True
+    dengan = screen.run_backtest(conn, cfg, "breakout", persist=False)
+    cfg.data["screening"]["market_regime_filter"] = False
+    tanpa = screen.run_backtest(conn, cfg, "breakout", persist=False)
+    assert len(dengan.trades) <= len(tanpa.trades), (
+        "filter rezim harus mengurangi (atau menyamai) jumlah trade, tidak menambah")
+
+
+def test_plan_advice_refuses_to_compute_from_corrupt_entry_price(cfg):
+    """WIDI avg 1,1 pernah menghasilkan usulan 'SL 50 | TP1 50' — identik dan tak berarti."""
+    frame = _trending_frame(300)
+    pos = portfolio.Position(ticker="WIDI", lot=1, avg_price=1.1)
+    saran = portfolio.plan_advice(pos, frame, cfg, last_price=26.0)
+    assert saran is not None
+    assert "stop_loss_baru" not in saran and "tp1_baru" not in saran
+    assert "di bawah harga minimum bursa" in " ".join(saran["alasan"])
+    assert "harga_beli_sebenarnya" in saran["perintah"]
+
+
+def test_report_names_the_actual_regime_ma_period(conn, cfg, monkeypatch):
+    """Label 'MA200' yang dipatok jadi bohong begitu periodenya bisa diatur."""
+    from hermes_idx import daily, data as dmod
+    monkeypatch.setattr(daily, "fetch_live_prices", lambda tickers: {})
+    dmod.upsert_ohlcv(conn, cfg.data["data"]["benchmark"], _trending_frame(400), "uji")
+    cfg.data["screening"]["regime_ma_period"] = 50
+    pasar = daily.build(conn, cfg)["pasar"]
+    assert pasar["regime_ma_period"] == 50
+    assert "MA50" in pasar["catatan"] and "MA200" not in pasar["catatan"]

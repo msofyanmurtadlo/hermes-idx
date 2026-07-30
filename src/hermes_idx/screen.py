@@ -23,7 +23,12 @@ def load_panel(conn, tickers: list[str], strategy, ctx, min_bars: int = 250
 
 def context(conn, cfg) -> strat.MarketContext:
     benchmark = data.load_ohlcv(conn, cfg.data["data"]["benchmark"])
-    return strat.build_context(benchmark if not benchmark.empty else None)
+    screening = cfg.data["screening"]
+    return strat.build_context(
+        benchmark if not benchmark.empty else None,
+        ma_period=int(screening.get("regime_ma_period", 200)),
+        below_days=int(screening.get("regime_below_days", 10)),
+    )
 
 
 def edges(conn) -> dict[str, dict]:
@@ -88,6 +93,78 @@ def scan(conn, cfg, strategy_names: list[str] | None = None, min_score: float | 
     return (found[:top] if top else found), warnings
 
 
+def rank(conn, cfg, top: int = 5, as_of: dt.date | None = None
+         ) -> tuple[list[dict], list[str]]:
+    """Peringkat SELURUH universe, bukan hanya yang lolos ambang.
+
+    `scan()` menjawab "mana yang boleh dibeli" dan sering mengembalikan daftar kosong —
+    di pasar bearish itu 73% hari (diukur pada 120 hari bursa terakhir). Fungsi ini
+    menjawab pertanyaan berbeda: "kalau harus memilih hari ini, mana yang paling siap?"
+    Jadi selalu ada isi, tapi tiap baris diberi label yang tidak menyamarkan keadaan:
+
+      PELUANG — trigger nyala, rezim bullish, skor lolos ambang, slot porto ada.
+      AMATI   — setup terbentuk tapi ada yang mengganjal (rezim/skor/slot/sudah dipegang).
+      PANTAU  — belum ada trigger sama sekali; level di bawahnya sekadar ancang-ancang.
+
+    Peringkat BUKAN rekomendasi beli. Selama `compare` belum menemukan strategi dengan
+    expectancy positif, PELUANG pun tetap belum terbukti menguntungkan.
+    """
+    tickers, warnings = data.universe(conn, cfg)
+    if not tickers:
+        return [], warnings + ["Universe kosong — jalankan `hermes-idx data update` dulu."]
+
+    ctx = context(conn, cfg)
+    known_edges = edges(conn)
+    avg_values = _avg_values(conn)
+    min_score = cfg.data["screening"]["min_score"]
+    held = {r["ticker"] for r in conn.execute("SELECT ticker FROM posisi WHERE lot > 0")}
+    slots = int(cfg.data["akun"]["max_open_positions"]) - len(held)
+
+    best: dict[str, dict] = {}
+    for strategy in strat.get(cfg.data["screening"]["strategies"]):
+        panel = load_panel(conn, tickers, strategy, ctx)
+        for ticker, frame in panel.items():
+            if as_of is not None:
+                frame = frame[frame.index.date <= as_of]
+                if frame.empty:
+                    continue
+            i = len(frame) - 1
+            triggered = bool(strategy.entry_signal(frame).iloc[i])
+            signal = signals.build(ticker, frame, strategy, i, cfg,
+                                   edge=known_edges.get(strategy.name),
+                                   avg_value=avg_values.get(ticker, 0.0))
+            if signal is None:
+                continue
+            bullish = bool(frame["bullish"].iloc[i])
+            if not triggered:
+                label, alasan = "PANTAU", "belum ada trigger entry"
+            elif ticker in held:
+                label, alasan = "AMATI", "sudah dipegang"
+            elif not bullish and cfg.data["screening"]["market_regime_filter"]:
+                label, alasan = "AMATI", "rezim IHSG bearish"
+            elif signal.skip_reason:
+                label, alasan = "AMATI", signal.skip_reason
+            elif signal.score < min_score:
+                label, alasan = "AMATI", f"skor {signal.score:.0f} < ambang {min_score:.0f}"
+            elif slots <= 0:
+                label, alasan = "AMATI", f"slot porto penuh ({len(held)}/{len(held)})"
+            else:
+                label, alasan = "PELUANG", "lolos seluruh ambang"
+
+            row = signal.as_row()
+            row.update(label=label, alasan=alasan, triggered=triggered,
+                       sektor=universe.sector_of(ticker))
+            # Satu baris per emiten: strategi dengan skor tertinggi yang mewakilinya.
+            # Trigger selalu menang atas non-trigger, berapa pun skornya — setup nyata
+            # lebih berarti daripada ancang-ancang berskor tinggi.
+            prev = best.get(ticker)
+            if prev is None or (triggered, signal.score) > (prev["triggered"], prev["score"]):
+                best[ticker] = row
+
+    ranked = sorted(best.values(), key=lambda r: (r["triggered"], r["score"]), reverse=True)
+    return ranked[:top] if top else ranked, warnings
+
+
 def _apply_concentration(conn, cfg, found, warnings):
     """Batas jumlah posisi & per sektor — diambil dari aturan script v3.
 
@@ -125,6 +202,16 @@ def _apply_concentration(conn, cfg, found, warnings):
         kept.append(sig)
         slots -= 1
         sector_count[sector] = sector_count.get(sector, 0) + 1
+
+    # Docstring di atas menjanjikan sinyal terpotong "tidak dibuang diam-diam", tapi dulu
+    # fungsi ini hanya mengembalikan `kept` sehingga `skip_reason` tak pernah sampai ke
+    # user. Di HP dengan porto penuh (6/6) artinya SEMUA sinyal hilang tanpa penjelasan.
+    dropped = [s for s in found if s.skip_reason]
+    if dropped:
+        warnings.append(
+            "Sinyal berikut ditahan oleh batas porto, bukan karena setup-nya jelek: "
+            + ", ".join(f"{s.ticker} (skor {s.score:.0f}, {s.skip_reason})" for s in dropped)
+        )
     return kept
 
 
