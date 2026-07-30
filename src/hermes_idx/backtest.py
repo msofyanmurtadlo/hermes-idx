@@ -57,10 +57,16 @@ def simulate(
     strategy: strat.Strategy,
     cfg,
     time_stop_days: int = 20,
+    partial: bool = True,
+    breakeven_at_r: float = 0.0,
 ) -> tuple[list[Trade], int]:
     """Simulasi satu emiten. Satu posisi pada satu waktu.
 
     Aturan eksekusi (BT-1): sinyal pada close T dieksekusi pada open T+1 + slippage.
+
+    `partial` dan `breakeven_at_r` mengaktifkan rencana exit bertahap. Keduanya bisa
+    dimatikan supaya hasil lama tetap bisa direproduksi — perbandingan A/B-nya ada di
+    docstring `Trio.levels()`.
     """
     entries = strategy.entry_signal(df)
     # Backtest WAJIB memakai filter yang sama dengan screening live. Sebelumnya tidak:
@@ -108,15 +114,31 @@ def simulate(
         tp2 = market.round_to_tick(levels.tp2, dates[exec_i], "down")
         lots = max(int(cfg.modal * cfg.risk_pct // (risk * market.LOT)), 1)
 
+        # RENCANA EXIT SEBENARNYA (perbaikan cacat, bukan fitur baru): mesin ini dulu
+        # hanya memakai `stop_loss` dan `tp2`, lalu keluar sekaligus. `tp1`, `tp1_size`,
+        # dan `breakeven_at_r` diabaikan — padahal ketiganya YANG dijalankan di layar
+        # oleh `signals.build()` dan laporan harian. Artinya angka backtest selama ini
+        # menggambarkan rencana yang tidak pernah dipakai siapa pun.
+        #
+        # Konsekuensi yang harus diketahui: partial exit hanya mungkin kalau posisinya
+        # >= 2 lot (IDX tidak mengenal pecahan lot). Untuk modal kecil dengan stop lebar,
+        # `lots` bisa jatuh ke 1 dan rencana ini otomatis kembali ke exit tunggal.
+        tp1 = market.round_to_tick(levels.tp1, dates[exec_i], "down")
+        lots_tp1 = int(lots * levels.tp1_size) if partial else 0
+        if not (entry < tp1 < tp2) or lots_tp1 <= 0 or lots_tp1 >= lots:
+            lots_tp1 = 0
+        be_trigger = entry + breakeven_at_r * risk if breakeven_at_r else np.inf
+
         exit_i, exit_price, reason = None, None, ""
         peak_high = -np.inf  # tertinggi sejak entry — dipakai time stop di bawah
+        tp1_price, sold_lots, sold_value = 0.0, 0, 0.0
         for j in range(exec_i, size):
             if np.isfinite(high[j]):
                 peak_high = max(peak_high, high[j])
             if low[j] <= stop:
                 # Gap melewati SL → eksekusi di open, bukan di harga SL.
                 exit_price = min(open_[j], stop) if open_[j] < stop else stop
-                exit_i, reason = j, "CUT_LOSS"
+                exit_i, reason = j, ("BREAKEVEN" if stop >= entry else "CUT_LOSS")
             elif high[j] >= tp2:
                 exit_price, exit_i, reason = tp2, j, "TAKE_PROFIT"
             elif exits[j]:
@@ -132,6 +154,20 @@ def simulate(
                 exit_price, exit_i, reason = open_[j + 1], j + 1, "TIME_STOP"
 
             if exit_i is None:
+                # Belum ditutup: ambil TP1 parsial, lalu naikkan stop ke breakeven.
+                # Urutan ini disengaja. Stop TIDAK dinaikkan pada bar yang sama dengan
+                # sentuhan 1R — di dalam satu bar kita tidak tahu mana yang lebih dulu,
+                # high atau low, dan menganggap yang menguntungkan duluan adalah cara
+                # backtest berbohong.
+                if lots_tp1 and not sold_lots and high[j] >= tp1 and not (
+                    j > 0 and np.isfinite(close[j - 1]) and close[j - 1] > 0
+                    and market.is_arb(float(tp1), close[j - 1], dates[j])
+                ):
+                    tp1_price = market.apply_slippage(float(tp1), "sell", fees, dates[j])
+                    sold_value = market.net_sell_value(tp1_price, lots_tp1, fees)
+                    sold_lots = lots_tp1
+                if peak_high >= be_trigger and stop < entry:
+                    stop = entry
                 continue
             # ARB: posisi tidak bisa dijual hari itu — tunda ke bar berikutnya.
             if j > 0 and np.isfinite(close[j - 1]) and close[j - 1] > 0 and market.is_arb(
@@ -145,9 +181,16 @@ def simulate(
             break
 
         exit_final = market.apply_slippage(float(exit_price), "sell", fees, dates[exit_i])
+        rest = lots - sold_lots
         gross_in = market.net_buy_value(entry, lots, fees)
-        gross_out = market.net_sell_value(exit_final, lots, fees)
+        gross_out = sold_value + market.net_sell_value(exit_final, rest, fees)
         pnl = gross_out - gross_in
+        if sold_lots:
+            # Satu Trade per posisi, harga keluar = rata-rata tertimbang. Memecahnya jadi
+            # dua Trade akan menggandakan hitungan trade dan membuat win rate bisa diatur
+            # hanya dengan memperbanyak tahap TP.
+            exit_final = (tp1_price * sold_lots + exit_final * rest) / lots
+            reason = f"TP1+{reason}"
         trades.append(
             Trade(
                 ticker=ticker,
@@ -266,9 +309,12 @@ def rolling_oos(
     """
     all_trades: list[Trade] = []
     unfilled = 0
+    exit_cfg = cfg.data["exit"]
     for ticker, frame in panel.items():
         trades, miss = simulate(ticker, frame, strategy, cfg,
-                                cfg.data["exit"]["time_stop_days"])
+                                exit_cfg["time_stop_days"],
+                                partial=exit_cfg.get("partial_tp1", True),
+                                breakeven_at_r=exit_cfg.get("breakeven_at_r", 0.0) or 0.0)
         all_trades.extend(trades)
         unfilled += miss
 

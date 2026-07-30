@@ -529,6 +529,73 @@ def test_trio_risk_reward_at_least_one_to_two(ohlc):
         assert (lv.tp2 - entry) >= 2 * (entry - lv.stop_loss)
 
 
+class _FixedLevels:
+    """Strategi boneka: entry di bar 0, level tetap supaya jalur exit bisa diuji persis."""
+
+    name, long_only = "stub", True
+
+    def prepare(self, df, ctx):
+        return df
+
+    def entry_signal(self, df):
+        return pd.Series([True] + [False] * (len(df) - 1), index=df.index)
+
+    def exit_signal(self, df):
+        return pd.Series(False, index=df.index)
+
+    def levels(self, df, i, entry):
+        return strat.Levels(900.0, 1100.0, 1300.0, 0.5, 0.5)  # stop -1R, TP1 +1R, TP2 +3R
+
+
+def _partial_frame() -> pd.DataFrame:
+    """Harga naik menyentuh TP1 (1100), lalu balik turun menembus entry (1000)."""
+    idx = pd.date_range("2024-01-01", periods=12, freq="B")
+    # Ekor turun sampai menembus stop awal 900 — supaya jalur TANPA breakeven punya
+    # titik keluar juga, jadi kedua rencana benar-benar dibandingkan pada jalur sama.
+    close = [1000, 1000, 1020, 1050, 1120, 1080, 1000, 950, 920, 890, 880, 880]
+    high = [1000, 1000, 1030, 1060, 1130, 1090, 1010, 960, 930, 900, 890, 890]
+    low = [1000, 1000, 1010, 1040, 1100, 1050, 950, 940, 910, 880, 870, 870]
+    return pd.DataFrame({"open": close, "high": high, "low": low, "close": close,
+                         "volume": [1_000_000] * 12}, index=idx)
+
+
+def test_partial_tp1_and_breakeven_turn_a_full_loss_into_a_small_win(cfg):
+    """Jalur harga yang SAMA, dua rencana exit. Ini inti perbaikannya.
+
+    Tanpa rencana bertahap posisi ini rugi penuh -1R: harga naik ke +1R lalu jatuh
+    menembus stop awal. Dengan TP1 parsial + breakeven, separuh posisi sudah dikunci
+    di +1R dan sisanya keluar di modal — hasilnya menang tipis.
+
+    Kalau `simulate()` diam-diam kembali mengabaikan tp1/breakeven (cacat yang baru
+    diperbaiki), assert pertama langsung gagal.
+    """
+    frame, stub = _partial_frame(), _FixedLevels()
+
+    bertahap, _ = backtest.simulate("TEST", frame, stub, cfg, 20,
+                                    partial=True, breakeven_at_r=1.0)
+    assert len(bertahap) == 1
+    trade = bertahap[0]
+    assert trade.exit_reason == "TP1+BREAKEVEN"
+    assert 0 < trade.r_multiple < 0.5, "separuh di +1R, sisanya di modal → menang tipis"
+    assert 1000 < trade.exit_price < 1100, "harga keluar = rata-rata tertimbang dua tahap"
+
+    tunggal, _ = backtest.simulate("TEST", frame, stub, cfg, 20,
+                                   partial=False, breakeven_at_r=0.0)
+    assert tunggal[0].exit_reason == "CUT_LOSS"
+    assert tunggal[0].r_multiple < -0.9, "tanpa rencana bertahap: rugi penuh"
+
+
+def test_partial_exit_never_sells_more_lots_than_held(cfg):
+    """TP1 tidak boleh menjual seluruh posisi lalu sisanya dijual lagi (dobel jual)."""
+    frame = _partial_frame()
+    stub = _FixedLevels()
+    stub.levels = lambda df, i, entry: strat.Levels(900.0, 1100.0, 1300.0, 1.0, 0.0)
+    trades, _ = backtest.simulate("TEST", frame, stub, cfg, 20,
+                                  partial=True, breakeven_at_r=1.0)
+    # tp1_size=1.0 tidak menyisakan apa pun → harus jatuh kembali ke exit tunggal
+    assert trades and not trades[0].exit_reason.startswith("TP1+")
+
+
 def test_daily_warns_when_positions_exceed_limit(conn, cfg, monkeypatch):
     from hermes_idx import daily
     monkeypatch.setattr(daily, "fetch_live_prices", lambda tickers: {})
