@@ -668,7 +668,8 @@ def test_rank_always_returns_rows_even_when_scan_is_empty(conn, cfg, monkeypatch
     assert all(r["label"] in {"PELUANG", "AMATI", "PANTAU"} for r in peringkat)
     assert all(r["alasan"] for r in peringkat), "tiap baris wajib punya alasan"
     if not sinyal:
-        assert not any(r["label"] == "PELUANG" for r in peringkat) or True
+        assert not any(r["label"] == "PELUANG" for r in peringkat), \
+            "tanpa sinyal lolos scan, tidak boleh ada baris PELUANG"
 
 
 # --------------------------------------------------------------------------- intraday
@@ -733,8 +734,9 @@ def test_regime_ma_period_is_configurable():
     panjang = strat.build_context(bench, ma_period=200)
     pendek = strat.build_context(bench, ma_period=20)
     assert panjang.bullish_regime is not None and pendek.bullish_regime is not None
-    # MA pendek bereaksi lebih cepat pada koreksi di ujung data
-    assert pendek.bullish_regime.iloc[-1] != panjang.bullish_regime.iloc[-1] or True
+    # MA pendek bereaksi lebih cepat — setidaknya ada satu bar yang beda
+    assert not pendek.bullish_regime.equals(panjang.bullish_regime), \
+        "MA period berbeda harus menghasilkan rezim berbeda di setidaknya satu titik"
     with pytest.raises(ValueError, match="harus >= 2"):
         strat.build_context(bench, ma_period=1)
 

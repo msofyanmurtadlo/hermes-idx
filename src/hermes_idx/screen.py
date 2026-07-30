@@ -147,7 +147,7 @@ def rank(conn, cfg, top: int = 5, as_of: dt.date | None = None
             elif signal.score < min_score:
                 label, alasan = "AMATI", f"skor {signal.score:.0f} < ambang {min_score:.0f}"
             elif slots <= 0:
-                label, alasan = "AMATI", f"slot porto penuh ({len(held)}/{len(held)})"
+                label, alasan = "AMATI", f"slot porto penuh ({len(held)}/{max_open})"
             else:
                 label, alasan = "PELUANG", "lolos seluruh ambang"
 
