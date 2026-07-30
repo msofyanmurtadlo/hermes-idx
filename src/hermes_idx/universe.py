@@ -34,9 +34,47 @@ def sector_of(ticker: str) -> str:
     return SECTORS.get(ticker.upper(), "lain")
 
 
-def seed(conn) -> int:
-    """Isi tabel `emiten` dari daftar kurasi. Idempoten."""
-    rows = [(t, None, sector_of(t), "Utama") for t in BLUECHIP]
+IDX_SCANNER = "https://scanner.tradingview.com/indonesia/scan"
+"""Sumber daftar emiten IDX (issue #4 — IDX sendiri tidak punya API publik).
+
+Endpoint yang sama sudah dipakai `daily.fetch_live_prices()` untuk harga real-time,
+jadi tidak ada ketergantungan baru. Satu request mengembalikan seluruh papan (~843).
+"""
+
+
+def fetch_all(timeout: float = 30.0) -> list[tuple[str, str | None, str]]:
+    """Seluruh emiten saham IDX dari TradingView Scanner. Return (ticker, nama, sektor).
+
+    Sektor: emiten yang ada di peta kurasi memakai label Indonesia yang sudah dipakai
+    batas konsentrasi (`bank`, `mining`, ...); sisanya memakai label sektor TradingView
+    apa adanya. Dicampur begitu supaya batas per-sektor untuk bluechip tidak berubah
+    arti hanya karena universe-nya diperluas.
+    """
+    import httpx
+
+    payload = {
+        "filter": [{"left": "type", "operation": "equal", "right": "stock"}],
+        "columns": ["description", "sector"],
+        "range": [0, 5000],
+        "sort": {"sortBy": "name", "sortOrder": "asc"},
+    }
+    resp = httpx.post(IDX_SCANNER, json=payload, timeout=timeout,
+                      headers={"User-Agent": "Mozilla/5.0 (compatible; hermes-idx/0.1)"})
+    resp.raise_for_status()
+    rows = []
+    for item in resp.json().get("data", []):
+        ticker = str(item["s"]).split(":")[-1].upper()
+        cells = list(item.get("d") or [])
+        nama = cells[0] if len(cells) > 0 else None
+        tv_sector = cells[1] if len(cells) > 1 else None
+        rows.append((ticker, nama, SECTORS.get(ticker) or tv_sector or "lain"))
+    return rows
+
+
+def seed(conn, rows: list[tuple[str, str | None, str]] | None = None) -> int:
+    """Isi tabel `emiten`. Default: daftar bluechip kurasi. Idempoten."""
+    rows = [(t, n, s, "Utama") for t, n, s in rows] if rows else \
+        [(t, None, sector_of(t), "Utama") for t in BLUECHIP]
     conn.executemany(
         "INSERT INTO emiten (ticker, nama, sektor, papan) VALUES (?,?,?,?)"
         " ON CONFLICT(ticker) DO UPDATE SET sektor = excluded.sektor",

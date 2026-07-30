@@ -494,6 +494,34 @@ def test_v3_stop_uses_atr_not_fixed_two_percent(ohlc):
     assert max(widths) > 2.05, "stop masih terpaku 2% — bug v3 kembali"
 
 
+def test_trio_needs_all_three_indicators(ohlc):
+    """Entry `trio` hanya sah bila TREN + MOMENTUM + ALIRAN DANA setuju.
+
+    Mematikan satu indikator saja harus menghapus sinyal. Tanpa cek ini, satu syarat
+    yang diam-diam selalu True (mis. MFI NaN) membuat `trio` diam-diam berubah jadi
+    strategi 2 indikator — dan angka backtest-nya jadi bohong.
+    """
+    s = strat.REGISTRY["trio"]
+    frame = s.prepare(ohlc, strat.MarketContext())
+    frame["bullish"] = True
+    frame.loc[:, ["ma200", "rsi2", "mfi"]] = [0.0, 1.0, 1.0]  # semua syarat lolos
+    assert s.entry_signal(frame).all()
+
+    for kolom, mati in (("ma200", 1e9), ("rsi2", 99.0), ("mfi", 99.0)):
+        rusak = frame.copy()
+        rusak[kolom] = mati
+        assert not s.entry_signal(rusak).any(), f"{kolom} tidak ikut menentukan entry"
+
+
+def test_trio_tp_above_entry_above_stop(ohlc):
+    s = strat.REGISTRY["trio"]
+    frame = s.prepare(ohlc, strat.MarketContext())
+    for i in range(250, len(frame), 25):
+        entry = float(frame["close"].iloc[i])
+        lv = s.levels(frame, i, entry)
+        assert lv.stop_loss < entry < lv.tp1 <= lv.tp2
+
+
 def test_daily_warns_when_positions_exceed_limit(conn, cfg, monkeypatch):
     from hermes_idx import daily
     monkeypatch.setattr(daily, "fetch_live_prices", lambda tickers: {})

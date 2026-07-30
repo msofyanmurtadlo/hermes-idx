@@ -254,6 +254,10 @@ class MeanReversion:
     label: str = "Mean Reversion Oversold"
     long_only: bool = True
     requires_bull_regime: bool = True
+    atr_mult: float = 3.0
+    """Pengali ATR untuk stop. Lihat catatan tuning di `levels()`."""
+    tp_r: float = 1.0
+    """Target profit dalam kelipatan risiko. Lihat catatan tuning di `levels()`."""
 
     def prepare(self, df: pd.DataFrame, ctx: MarketContext) -> pd.DataFrame:
         out = _common(df, ctx)
@@ -274,11 +278,29 @@ class MeanReversion:
         return (df["close"] >= df["ema20"]).fillna(False)
 
     def levels(self, df: pd.DataFrame, i: int, entry: float) -> Levels:
-        stop = min(_atr_stop(df, i, entry, 2.0), entry * 0.995)
+        """Stop ATR×3 + TP 1R — DITALA UNTUK WIN RATE, atas permintaan eksplisit.
+
+        Baca ini sebelum menaikkan target win rate lagi. Parameter lama (ATR×2, TP
+        ke EMA20 dengan lantai 1.5R) memberi win rate 55.9%. Permintaannya 60%, dan
+        satu-satunya cara mendapatkannya adalah melebarkan stop + mendekatkan TP —
+        tepat resep yang diperingatkan `cli.py`: win rate naik karena setiap trade
+        diberi ruang lebih besar untuk pulih, bukan karena sinyalnya membaik.
+
+        Sweep 25 kombinasi (ATR 2.0–4.0 × TP 0.6–1.5R) pada 285 trade, 2022-04 s/d
+        2026-07. Titik yang dipakai — ATR×3.0, TP 1.0R:
+
+            win rate     55.9%  ->  61.6%   (100 trade terakhir: 57% -> 65%)
+            expectancy  -0.180  -> -0.092 R
+            profit factor 0.62  ->  0.70
+            max drawdown -42.2% -> -31.3%
+
+        Expectancy MASIH NEGATIF. 61.6% trade menang, tapi kalah rata-rata lebih besar
+        daripada menangnya, jadi akun tetap menyusut. Win rate 60% tercapai; profit
+        tidak. Menaikkannya lagi (ATR×4 = 62.4%) hanya menggeser angka yang sama.
+        """
+        stop = min(_atr_stop(df, i, entry, self.atr_mult), entry * 0.995)
         risk = entry - stop
-        target = float(df["ema20"].iloc[i])
-        tp1 = max(target, entry + 0.8 * risk)
-        return Levels(stop, tp1, max(tp1 * 1.02, entry + 1.5 * risk), 0.7, 0.3)
+        return Levels(stop, entry + 0.8 * risk, entry + self.tp_r * risk, 0.7, 0.3)
 
     def reason(self, df: pd.DataFrame, i: int) -> str:
         row = df.iloc[i]
@@ -403,8 +425,80 @@ class V3Score:
         )
 
 
+# --------------------------------------------------------------------------- S5
+
+@dataclass
+class Trio:
+    """Tiga indikator, tiga peran berbeda: tren, momentum, aliran dana.
+
+    Dipilih dari uji 6 kombinasi trio (skrip sweep, 2021-09 s/d 2026-07, universe &
+    biaya yang sama). Yang kalah dan kenapa:
+
+        ema50 + rsi14 + volume       904 trade, win rate 40.0%, PF 0.41
+        supertrend + macd + rsi14   3441 trade, win rate 29.2%, PF 0.32, DD -98.6%
+        ema50 + williams%r + obv     192 trade, win rate 54.7%, PF 0.64
+        ma200 + bollinger + stoch    240 trade, win rate 59.2%, PF 0.74
+        adx + rsi14 + volume          92 trade, win rate 53.3%, PF 0.48
+        ma200 + rsi2 + mfi  <- ini   122 trade, win rate 62.3%, PF 0.89
+
+    Pola yang terlihat: trio yang mengonfirmasi tren (semua indikator setuju "naik")
+    justru paling buruk — ia membeli setelah pergerakan selesai. Yang bertahan adalah
+    trio yang SATU indikatornya menolak dua lainnya: tren naik (MA200) tapi harga
+    sedang dibuang (RSI2 < 10) dan uang sedang keluar (MFI < 30).
+
+    MFI di sini bukan duplikat RSI2. RSI2 hanya melihat harga; MFI menimbang harga
+    dengan volume, jadi ia menyaring penurunan yang sepi — turun tanpa volume berarti
+    tidak ada yang benar-benar melepas barang, dan pantulannya lemah. Menambahkan MFI
+    memangkas 285 sinyal `mean_reversion` menjadi 122, dan itulah sumber perbaikannya.
+
+    Threshold-nya berada di dataran, bukan di ujung pisau: rsi2 5/10/15 dan mfi 20/30/40
+    semuanya di kisaran win rate 57–64%. Angka 10/30 dipilih karena titik terbaiknya,
+    bukan satu-satunya yang bekerja.
+    """
+
+    name: str = "trio"
+    label: str = "Trio MA200 + RSI(2) + MFI"
+    long_only: bool = True
+    requires_bull_regime: bool = True
+    rsi2_max: float = 10.0
+    mfi_max: float = 30.0
+    atr_mult: float = 3.5
+    tp_r: float = 1.0
+
+    def prepare(self, df: pd.DataFrame, ctx: MarketContext) -> pd.DataFrame:
+        out = _common(df, ctx)
+        out["rsi2"] = ind.rsi(out["close"], 2)
+        out["ma200"] = ind.sma(out["close"], 200)
+        out["mfi"] = ind.mfi(out, 14)
+        return out
+
+    def entry_signal(self, df: pd.DataFrame) -> pd.Series:
+        return (
+            df["bullish"]
+            & (df["close"] > df["ma200"])      # 1. tren: masih di atas MA200
+            & (df["rsi2"] < self.rsi2_max)     # 2. momentum: oversold ekstrem
+            & (df["mfi"] < self.mfi_max)       # 3. aliran dana: tekanan jual nyata
+        ).fillna(False)
+
+    def exit_signal(self, df: pd.DataFrame) -> pd.Series:
+        return (df["close"] >= df["ema20"]).fillna(False)
+
+    def levels(self, df: pd.DataFrame, i: int, entry: float) -> Levels:
+        stop = min(_atr_stop(df, i, entry, self.atr_mult), entry * 0.995)
+        risk = entry - stop
+        return Levels(stop, entry + 0.8 * risk, entry + self.tp_r * risk, 0.7, 0.3)
+
+    def reason(self, df: pd.DataFrame, i: int) -> str:
+        row = df.iloc[i]
+        return (
+            f"Tren utuh (harga di atas MA200 {row['ma200']:,.0f}), tapi RSI(2) "
+            f"{row['rsi2']:.0f} oversold dan MFI {row['mfi']:.0f} menunjukkan tekanan "
+            f"jual berbobot volume. Target balik ke EMA20 ({row['ema20']:,.0f})."
+        )
+
+
 REGISTRY: dict[str, Strategy] = {
-    s.name: s for s in (Breakout(), Pullback(), MomentumRS(), MeanReversion(), V3Score())
+    s.name: s for s in (Breakout(), Pullback(), MomentumRS(), MeanReversion(), V3Score(), Trio())
 }
 
 

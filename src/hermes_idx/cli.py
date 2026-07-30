@@ -135,6 +135,26 @@ def data_seed_bluechip(home: Optional[Path] = HOME_OPT, as_json: bool = JSON_OPT
                       f"Lanjut: `hermes-idx data update`.")
 
 
+@data_app.command("seed-idx")
+def data_seed_idx(home: Optional[Path] = HOME_OPT, as_json: bool = JSON_OPT):
+    """Isi daftar emiten dari SELURUH papan IDX (TradingView Scanner, ~843 emiten)."""
+    _, conn = _ctx(home)
+    try:
+        rows = universe.fetch_all()
+    except Exception as exc:  # noqa: BLE001 - jaringan/format berubah, jangan bikin traceback
+        _fail(f"gagal mengambil daftar emiten IDX: {exc}", as_json)
+        return
+    if not rows:
+        _fail("daftar emiten IDX kosong — endpoint scanner mungkin berubah.", as_json)
+        return
+    count = universe.seed(conn, rows)
+    agent.emit({"ok": True, "emiten": count}, as_json)
+    if not as_json:
+        console.print(f"[green]{count} emiten IDX[/green] tercatat. "
+                      f"Lanjut: `hermes-idx data update` (butuh ~30 menit untuk 5 tahun "
+                      f"riwayat semua emiten).")
+
+
 @port_app.command("import-legacy")
 def port_import_legacy(
     scripts_dir: Optional[Path] = typer.Option(None, "--from",
