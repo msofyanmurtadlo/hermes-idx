@@ -220,7 +220,7 @@ def update(
         if not full:
             seen = last_date(conn, ticker)
             if seen:
-                if seen >= today - dt.timedelta(days=1):
+                if seen >= today:
                     results[ticker] = 0
                     if progress:
                         progress(ticker, 0)

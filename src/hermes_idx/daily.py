@@ -49,8 +49,9 @@ def fetch_live_prices(tickers: list[str]) -> dict[str, dict]:
         for item in j.get("data", []):
             ticker = item["s"].split(":")[-1]
             d = item["d"]
-            if d[0] is not None:
-                result[ticker] = {"price": float(d[0]), "chg_pct": float(d[1] or 0), "source": "TV"}
+            price = d[0]
+            if price is not None and float(price) > 0:
+                result[ticker] = {"price": float(price), "chg_pct": float(d[1] or 0), "source": "TV"}
         return result
     except Exception:
         return {}
@@ -102,6 +103,13 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
     bench_live = {"COMPOSITE": live_all["COMPOSITE"]} if "COMPOSITE" in live_all else {}
     live_bench_price = bench_live.get("COMPOSITE", {}).get("price")
     live_bench_chg = bench_live.get("COMPOSITE", {}).get("chg_pct")
+
+    # Peringatkan kalau live fetch gagal total — laporan pakai harga DB basi
+    if live_tickers and not all_live:
+        report["peringatan"].append(
+            "⚠️ Harga live TradingView GAGAL diambil — laporan memakai harga DB "
+            "(mungkin basi). Cek koneksi internet."
+        )
 
     if benchmark.empty and not live_bench_price:
         report["pasar"] = {"tersedia": False}
@@ -157,9 +165,9 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
                 "error": "tidak ada data harga",
             })
             continue
-        # P/L dihitung dari harga live
-        pnl_rp = (last - pos.avg_price) * pos.lot * 100
-        pnl_pct = (last / pos.avg_price - 1) * 100 if pos.avg_price else 0.0
+        # P/L dihitung dari harga live, termasuk fee (konsisten dengan review())
+        pnl_rp = market.net_sell_value(last, pos.lot, cfg.fees) - market.net_buy_value(pos.avg_price, pos.lot, cfg.fees)
+        pnl_pct = pnl_rp / market.net_buy_value(pos.avg_price, pos.lot, cfg.fees) * 100 if pos.avg_price else 0.0
         total_pnl += pnl_rp
         total_value += last * pos.lot * 100
         # Jarak ke SL/TP — info paling penting untuk monitoring harian.
@@ -226,7 +234,7 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
         "maks_posisi": cfg.data["akun"]["max_open_positions"],
         "nilai_pasar": round(total_value, 0),
         "unrealized_pnl": round(total_pnl, 0),
-        "exposure_pct": round(total_value / cfg.modal * 100, 1) if cfg.modal else 0.0,
+        "exposure_pct": round(total_value / total_equity * 100, 1) if total_equity else 0.0,
         "tanpa_sl": [p["ticker"] for p in report["posisi"] if p.get("tanpa_sl")],
         "trading_balance": trading_balance,
         "total_equity": total_equity,
