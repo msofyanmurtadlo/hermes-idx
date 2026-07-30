@@ -64,7 +64,11 @@ DEFAULTS: dict[str, Any] = {
     },
     "exit": {
         "time_stop_days": 20,
-        "breakeven_at_r": 1.0,
+        # Horizon SWING. Tanpa batas ini posisi rata-rata dipegang 42,6 hari — itu
+        # position trading, bukan swing. 0 = tanpa batas.
+        "max_holding_days": 12,
+        "partial_tp1": False,
+        "breakeven_at_r": 0.0,
         "trailing_activate_at_r": 1.5,
         "trailing_method": "chandelier",
         "alert_near_sl_pct": 2.0,

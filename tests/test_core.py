@@ -585,6 +585,30 @@ def test_partial_tp1_and_breakeven_turn_a_full_loss_into_a_small_win(cfg):
     assert tunggal[0].r_multiple < -0.9, "tanpa rencana bertahap: rugi penuh"
 
 
+def test_max_holding_days_closes_a_still_running_winner(cfg):
+    """Batas swing harus memotong posisi yang MASIH naik, bukan cuma yang mandek.
+
+    Time stop lama hanya menendang posisi yang belum pernah sentuh 1R, jadi pemenang
+    bisa ditahan berbulan-bulan dan "swing" cuma sebutan. Harga di sini naik terus
+    tanpa pernah kena TP2 (1300) maupun stop.
+    """
+    idx = pd.date_range("2024-01-01", periods=20, freq="B")
+    close = [1000 + 10 * n for n in range(20)]          # naik pelan, TP2 tak tersentuh
+    frame = pd.DataFrame({"open": close, "high": [c + 5 for c in close],
+                          "low": [c - 5 for c in close], "close": close,
+                          "volume": [1_000_000] * 20}, index=idx)
+    stub = _FixedLevels()
+
+    dibatasi, _ = backtest.simulate("TEST", frame, stub, cfg, 20,
+                                    partial=False, max_holding_days=5)
+    assert dibatasi and dibatasi[0].exit_reason == "MAX_HOLD"
+    assert (dibatasi[0].exit_date - dibatasi[0].entry_date).days <= 10  # 5 hari bursa
+
+    tanpa_batas, _ = backtest.simulate("TEST", frame, stub, cfg, 20,
+                                       partial=False, max_holding_days=0)
+    assert not tanpa_batas, "tanpa batas posisi ini tidak pernah ditutup"
+
+
 def test_partial_exit_never_sells_more_lots_than_held(cfg):
     """TP1 tidak boleh menjual seluruh posisi lalu sisanya dijual lagi (dobel jual)."""
     frame = _partial_frame()

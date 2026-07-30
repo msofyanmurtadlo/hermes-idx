@@ -59,6 +59,7 @@ def simulate(
     time_stop_days: int = 20,
     partial: bool = True,
     breakeven_at_r: float = 0.0,
+    max_holding_days: int = 0,
 ) -> tuple[list[Trade], int]:
     """Simulasi satu emiten. Satu posisi pada satu waktu.
 
@@ -152,6 +153,14 @@ def simulate(
                 if j + 1 >= size:
                     break
                 exit_price, exit_i, reason = open_[j + 1], j + 1, "TIME_STOP"
+            # Batas horizon SWING. Beda dari time stop di atas: time stop membuang posisi
+            # yang tidak bergerak, batas ini membuang posisi yang MASIH bergerak tapi
+            # sudah terlalu lama dipegang. Tanpa ini "swing" cuma sebutan — posisi yang
+            # menuju 3R bisa ditahan berbulan-bulan.
+            elif max_holding_days and j - exec_i >= max_holding_days:
+                if j + 1 >= size:
+                    break
+                exit_price, exit_i, reason = open_[j + 1], j + 1, "MAX_HOLD"
 
             if exit_i is None:
                 # Belum ditutup: ambil TP1 parsial, lalu naikkan stop ke breakeven.
@@ -314,7 +323,8 @@ def rolling_oos(
         trades, miss = simulate(ticker, frame, strategy, cfg,
                                 exit_cfg["time_stop_days"],
                                 partial=exit_cfg.get("partial_tp1", True),
-                                breakeven_at_r=exit_cfg.get("breakeven_at_r", 0.0) or 0.0)
+                                breakeven_at_r=exit_cfg.get("breakeven_at_r", 0.0) or 0.0,
+                                max_holding_days=exit_cfg.get("max_holding_days", 0) or 0)
         all_trades.extend(trades)
         unfilled += miss
 
