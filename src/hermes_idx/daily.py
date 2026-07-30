@@ -91,10 +91,19 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
         last = float(frame["close"].iloc[-1])
         total_pnl += action.pnl_rp
         total_value += last * pos.lot * 100
+        # Jarak ke SL/TP — info paling penting untuk monitoring harian.
+        sl = pos.stop_loss
+        tp1 = getattr(pos, "tp1", None)
+        tp2 = getattr(pos, "tp2", None)
+        sl_dist = round((last - sl) / last * 100, 1) if sl else None
+        tp1_dist = round((tp1 - last) / last * 100, 1) if tp1 else None
+        tp2_dist = round((tp2 - last) / last * 100, 1) if tp2 else None
         report["posisi"].append({
             "ticker": pos.ticker, "lot": pos.lot, "avg_price": pos.avg_price,
             "last": last, "pnl_rp": action.pnl_rp, "pnl_pct": action.pnl_pct,
-            "stop_loss": pos.stop_loss, "tanpa_sl": pos.stop_loss is None,
+            "stop_loss": sl, "tp1": tp1, "tp2": tp2,
+            "sl_dist_pct": sl_dist, "tp1_dist_pct": tp1_dist, "tp2_dist_pct": tp2_dist,
+            "tanpa_sl": sl is None,
             "sektor": universe.sector_of(pos.ticker),
         })
         if action.action != "HOLD":
@@ -112,6 +121,10 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
             f"sinyal beli baru sampai jumlahnya turun — kurangi dulu, atau naikkan "
             f"`akun.max_open_positions` kalau memang disengaja."
         )
+    from .db import get_meta
+    balance_raw = get_meta(conn, "trading_balance")
+    trading_balance = float(balance_raw) if balance_raw else None
+    total_equity = round(trading_balance + total_value, 0) if trading_balance is not None else None
     report["ringkasan_porto"] = {
         "jumlah_posisi": len(positions),
         "maks_posisi": cfg.data["akun"]["max_open_positions"],
@@ -119,6 +132,8 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
         "unrealized_pnl": round(total_pnl, 0),
         "exposure_pct": round(total_value / cfg.modal * 100, 1) if cfg.modal else 0.0,
         "tanpa_sl": [p["ticker"] for p in report["posisi"] if p.get("tanpa_sl")],
+        "trading_balance": trading_balance,
+        "total_equity": total_equity,
     }
 
     # --- edge: apakah ada strategi yang layak dipakai? ----------------------
@@ -176,6 +191,10 @@ def render_text(report: dict) -> str:
 
     ring = report["ringkasan_porto"]
     lines.append(f"\n=== PORTOFOLIO ({ring['jumlah_posisi']}/{ring['maks_posisi']} posisi) ===")
+    if ring.get("trading_balance") is not None:
+        lines.append(f"Trading Balance: Rp{ring['trading_balance']:,.0f}")
+    if ring.get("total_equity") is not None:
+        lines.append(f"Total Equity: Rp{ring['total_equity']:,.0f}")
     if not report["posisi"]:
         lines.append("Belum ada posisi tercatat.")
     else:
@@ -192,6 +211,16 @@ def render_text(report: dict) -> str:
                 f"{pos['last']:,.0f} | P/L Rp{pos['pnl_rp']:+,.0f} "
                 f"({pos['pnl_pct']:+.2f}%){flag}"
             )
+            # Baris SL/TP dengan jarak — info monitoring paling penting.
+            parts = []
+            if pos.get("stop_loss"):
+                parts.append(f"SL {pos['stop_loss']:,.0f} ({pos['sl_dist_pct']:+.1f}%)")
+            if pos.get("tp1"):
+                parts.append(f"TP1 {pos['tp1']:,.0f} ({pos['tp1_dist_pct']:+.1f}%)")
+            if pos.get("tp2"):
+                parts.append(f"TP2 {pos['tp2']:,.0f} ({pos['tp2_dist_pct']:+.1f}%)")
+            if parts:
+                lines.append(f"   {' | '.join(parts)}")
         lines.append(f"Total unrealized: Rp{ring['unrealized_pnl']:+,.0f} | "
                      f"exposure {ring['exposure_pct']:.0f}% modal")
         if ring["tanpa_sl"]:
