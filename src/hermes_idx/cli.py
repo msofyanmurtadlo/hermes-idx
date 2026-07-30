@@ -320,7 +320,9 @@ def _num(value):
 
 @app.command()
 def daily(home: Optional[Path] = HOME_OPT, as_json: bool = JSON_OPT,
-          update: bool = typer.Option(False, "--update", help="Update data dulu.")):
+          update: bool = typer.Option(False, "--update", help="Update data dulu."),
+          morning: bool = typer.Option(False, "--morning", help="Mode pagi: porto + rekomendasi beli."),
+          afternoon: bool = typer.Option(False, "--afternoon", help="Mode sore: review porto saja, tanpa rekomendasi.")):
     """Laporan harian lengkap: rezim pasar, porto, aksi, sinyal. Untuk cron/Hermes."""
     from . import daily as dailymod
 
@@ -331,10 +333,11 @@ def daily(home: Optional[Path] = HOME_OPT, as_json: bool = JSON_OPT,
         symbols = [cfg.data["data"]["benchmark"]] + [r["ticker"] for r in rows]
         datamod.update(conn, symbols, source, cfg.data["data"]["history_years"])
 
+    mode = "morning" if morning else ("afternoon" if afternoon else "full")
     report = dailymod.build(conn, cfg)
     agent.emit({"ok": True, **report}, as_json)
     if not as_json:
-        console.print(dailymod.render_text(report))
+        console.print(dailymod.render_text(report, mode=mode))
 
 
 @app.command("compare")

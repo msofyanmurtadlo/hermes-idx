@@ -174,12 +174,21 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
     return report
 
 
-def render_text(report: dict) -> str:
-    """Render jadi teks polos — cocok untuk WhatsApp/Telegram, tanpa tabel markdown."""
+def render_text(report: dict, mode: str = "full") -> str:
+    """Render jadi teks polos — cocok untuk WhatsApp/Telegram, tanpa tabel markdown.
+
+    mode:
+      'morning'   — porto + rekomendasi beli + position sizing (sebelum bursa)
+      'afternoon' — review porto SAJA, tanpa rekomendasi beli (setelah bursa)
+      'full'      — semua section (default / manual)
+    """
+    show_sinyal = mode in ("morning", "full")
     lines: list[str] = []
 
     # --- Header ---
-    lines.append(f"📊 *LAPORAN IDX* — {report['tanggal']} {report['jam']}")
+    label = {"morning": "PAGI", "afternoon": "SORE", "full": ""}.get(mode, "")
+    header = f"📊 *LAPORAN IDX {label}* — {report['tanggal']} {report['jam']}".strip()
+    lines.append(header)
     lines.append("")
 
     # --- Pasar ---
@@ -243,21 +252,22 @@ def render_text(report: dict) -> str:
             lines.append(f"   _{act['alasan']}_")
     lines.append("")
 
-    # --- Sinyal Beli ---
-    lines.append("*🔍 SINYAL BELI*")
-    if not report["sinyal"]:
-        lines.append("_Tidak ada. Sistem menahan diri — tidak ada setup memenuhi syarat._")
-    else:
-        if not report.get("strategi_terbukti"):
-            lines.append("_(Belum terbukti untung — pengamatan, bukan rekomendasi)_")
-        for sig in report["sinyal"]:
-            lines.append(
-                f"• *{sig['ticker']}* skor {sig['score']:.0f} | "
-                f"Entry {sig['entry_price']:,} | SL {sig['stop_loss']:,} | "
-                f"TP {sig['tp1']:,} | {sig['position_lot']} lot"
-            )
-            lines.append(f"   _{sig['notes']}_")
-    lines.append("")
+    # --- Sinyal Beli (pagi & full saja; sore = review tanpa rekomendasi) ---
+    if show_sinyal:
+        lines.append("*🔍 SINYAL BELI*")
+        if not report["sinyal"]:
+            lines.append("_Tidak ada. Sistem menahan diri — tidak ada setup memenuhi syarat._")
+        else:
+            if not report.get("strategi_terbukti"):
+                lines.append("_(Belum terbukti untung — pengamatan, bukan rekomendasi)_")
+            for sig in report["sinyal"]:
+                lines.append(
+                    f"• *{sig['ticker']}* skor {sig['score']:.0f} | "
+                    f"Entry {sig['entry_price']:,} | SL {sig['stop_loss']:,} | "
+                    f"TP {sig['tp1']:,} | {sig['position_lot']} lot"
+                )
+                lines.append(f"   _{sig['notes']}_")
+        lines.append("")
 
     # --- Peringatan (di bawah, bukan di atas — biar nggak nutupin info utama) ---
     if report["peringatan"]:
