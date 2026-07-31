@@ -4,20 +4,24 @@
 close, keluarkan sinyal yang lengkap dengan stop loss, take profit, dan position size —
 plus backtest out-of-sample yang bisa Anda audit sendiri.
 
-> ⚠️ **STATUS: v0.3 — satu strategi akhirnya lolos uji signifikansi.**
-> Pada universe **seluruh IDX (843 emiten, disaring likuiditas jadi 79)** dengan horizon
-> swing 12 hari bursa, `breakout` memberi expectancy **+0,317R, profit factor 1,50,
-> p=0,0022** atas 350 trade. Itu yang pertama menembus ambang p < 0,05 — dan tetap lolos
-> setelah koreksi Bonferroni untuk 6 strategi yang diuji (0,05/6 = 0,0083).
+> ⚠️ **STATUS: v0.4 — monitoring real-time + backtest otomatis + manajemen risiko aktif.**
 >
-> Yang berubah dari v0.2 bukan strateginya, melainkan **tiga cacat pengukuran**: universe
-> terlalu sempit (51 bluechip), tidak ada batas horizon (posisi ditahan rata-rata 42 hari),
-> dan backtest tidak menyimulasikan rencana exit yang sebenarnya dipakai. Rinciannya di
-> riwayat commit; angka lengkapnya di [`docs/BUKTI-01.md`](docs/BUKTI-01.md).
+> **Belum ada strategi yang terbukti positif** pada data terbaru (Juli 2026). Semua 6
+> strategi masih expectancy negatif setelah biaya. Trio paling dekat: -0.001R, PF 1.00.
+> Sinyal beli tetap ditahan (fail-closed) sampai ada yang lolos p < 0.05.
 >
-> **Ini tetap bukan izin untuk mempertaruhkan uang.** 350 trade adalah sampel kecil,
-> periodenya satu rezim pasar, dan p=0,0022 bukan jaminan. Empat strategi lain masih
-> belum signifikan atau merugi.
+> Yang baru di v0.4:
+> - **Harga real-time** via TradingView Scanner API (bukan Yahoo yang stale)
+> - **Backtest otomatis** tiap hari 17:00 WIB (data update → compare → simpan edge)
+> - **Alert SL/TP** tiap 5 menit jam bursa — push notifikasi kalau kena/mendekati
+> - **Saran reposisi SL/TP** termasuk trailing stop recommendation
+> - **Rekomendasi tambah posisi** dengan position sizing dari saldo tersedia
+> - **Section Backtest Edge** di laporan — transparansi expectancy per strategi
+> - **P/L fee-inclusive** — konsisten dengan review() dan Stockbit
+> - **Validasi data** — harga 0/negatif ditolak, live fetch gagal = warning eksplisit
+>
+> **Ini tetap bukan izin untuk mempertaruhkan uang.** Data historis tidak menjamin
+> hasil di masa depan. Keputusan transaksi sepenuhnya tanggung jawab pengguna.
 
 ## Pasang
 
@@ -90,18 +94,21 @@ Laporan pagi punya dua bagian yang sering tertukar. Bedanya penting:
 
 ### Laporan otomatis tiap hari
 
-Di Android, dua laporan bisa jalan sendiri tanpa Anda buka HP:
+Di Android (Termux + Hermes Agent), semua jalan sendiri tanpa buka HP:
 
-```cron
-30 7  * * 1-5 ~/hermes-idx/scripts/hermes-idx-report.sh pagi   # sebelum bursa buka
-30 16 * * 1-5 ~/hermes-idx/scripts/hermes-idx-report.sh sore   # setelah bursa tutup
+```
+08:45  Laporan Pagi    — porto + rekomendasi + peringkat + saran reposisi + edge
+16:30  Laporan Sore    — review porto saja, tanpa rekomendasi beli
+17:00  Backtest Auto   — data update → compare → simpan edge ke DB (background)
+09-16  Alert SL/TP     — tiap 5 menit, push WA kalau kena/mendekati (1.5%)
 ```
 
-Pagi memberi porto + peringkat + saran beli; sore hanya review posisi, tanpa rekomendasi
-beli — supaya tidak memancing transaksi di jam yang salah. Hasilnya ditulis ke
-`~/.hermes-idx/laporan/terbaru-pagi.txt` dan `terbaru-sore.txt`.
+Pagi memberi porto + peringkat + saran beli + trailing stop recommendation; sore hanya
+review posisi — supaya tidak memancing transaksi di jam yang salah.
 
-Langkah lengkap termasuk cara mengujinya ada di [`docs/TERMUX.md`](docs/TERMUX.md).
+Backtest otomatis memastikan edge data selalu fresh: setiap sore setelah bursa tutup,
+sistem update data Yahoo, jalankan compare semua strategi, dan simpan hasilnya ke DB.
+Laporan besok pagi langsung pakai edge terbaru.
 
 ### Kalau ada yang tidak beres
 
