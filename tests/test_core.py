@@ -958,3 +958,26 @@ def test_report_names_the_actual_regime_ma_period(conn, cfg, monkeypatch):
     pasar = daily.build(conn, cfg)["pasar"]
     assert pasar["regime_ma_period"] == 50
     assert "MA50" in pasar["catatan"] and "MA200" not in pasar["catatan"]
+
+
+# --- Fraksi harga IDX (pricing) --------------------------------------------
+# Kasus nyata: amend SL INDF ke 6,960 ditolak bursa ("harus kelipatan 25").
+def test_tick_of_ranges():
+    from hermes_idx.pricing import tick_of
+    assert tick_of(100) == 1
+    assert tick_of(199) == 1
+    assert tick_of(300) == 2
+    assert tick_of(1200) == 5
+    assert tick_of(4500) == 10
+    assert tick_of(6960) == 25
+
+def test_snap_price_sl_not_below_target():
+    from hermes_idx.pricing import snap_price
+    # Breakeven INDF avg 6960.42 → 6975 (ceil), bukan 6960 yang invalid
+    assert snap_price(6960.42, "ceil") == 6975
+    assert snap_price(6960.42, "floor") == 6950
+    # Hasil snap selalu kelipatan fraksinya sendiri
+    for p in (50.0, 199.0, 200.0, 499.0, 500.0, 1999.0, 2000.0, 4999.0, 5000.0, 7450.0):
+        for mode in ("floor", "ceil", "nearest"):
+            s = snap_price(p, mode)
+            assert s % __import__("hermes_idx.pricing", fromlist=["tick_of"]).tick_of(float(s)) == 0

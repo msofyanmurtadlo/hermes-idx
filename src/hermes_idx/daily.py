@@ -15,7 +15,7 @@ import datetime as dt
 import json
 import subprocess
 
-from . import data as datamod, market, mcp, portfolio, screen, universe
+from . import data as datamod, market, mcp, portfolio, pricing, screen, universe
 
 URGENCY_ORDER = {"SEGERA": 0, "HARI INI": 1, "AMATI": 2}
 
@@ -305,13 +305,16 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
         #   c) SL udah di atas avg tapi jauh dari harga → trailing lebih efisien
         # Trail %: saham besar (BBCA/BBRI) 1-2%, mid/small 2-3%
         trail_pct = 1.5 if pos.avg_price >= 1000 else 2.5
-        trail_stop = round(last * (1 - trail_pct / 100), -1)  # bulatkan ke tick
+        # Bulatkan ke fraksi harga yang valid — Stockbit menolak order yang
+        # bukan kelipatan fraksi ("Fraksi harga harus dalam kelipatan 25").
+        trail_stop = pricing.snap_price(last * (1 - trail_pct / 100), "floor")
 
         # 1) Profit > 5% tapi SL masih di bawah avg → trailing / breakeven
         if pnl_pct >= 5 and sl and sl < pos.avg_price:
+            be_price = pricing.snap_price(pos.avg_price, "ceil")
             saran_list.append(
                 f"🔒 Profit +{pnl_pct:.1f}% tapi SL {sl:,.0f} masih di bawah avg — "
-                f"naikkan minimal ke breakeven {pos.avg_price:,.0f}"
+                f"naikkan minimal ke breakeven {be_price:,.0f}"
             )
             if trail_stop > pos.avg_price:
                 saran_list.append(
