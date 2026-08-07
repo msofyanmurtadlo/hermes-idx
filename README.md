@@ -1,16 +1,26 @@
 # hermes-idx
 
-**Screener saham IDX berbasis CLI yang jalan di HP.** Screening ~900 emiten setelah market
-close, keluarkan sinyal yang lengkap dengan stop loss, take profit, dan position size —
-plus backtest out-of-sample yang bisa Anda audit sendiri.
+**Screener saham IDX berbasis CLI yang jalan di HP maupun VPS.** Screening emiten
+bluechip setelah market close, keluarkan sinyal yang lengkap dengan stop loss, take
+profit, dan position size — plus backtest out-of-sample yang bisa Anda audit sendiri.
 
-> ⚠️ **STATUS: v0.4 — monitoring real-time + backtest otomatis + manajemen risiko aktif.**
+> ⚠️ **STATUS: v0.5 — screening bluechip-only + MCP TradingView + sinyal realtime.**
 >
 > **Belum ada strategi yang terbukti positif** pada data terbaru (Juli 2026). Semua 6
 > strategi masih expectancy negatif setelah biaya. Trio paling dekat: -0.001R, PF 1.00.
 > Sinyal beli tetap ditahan (fail-closed) sampai ada yang lolos p < 0.05.
 >
-> Yang baru di v0.4:
+> Yang baru di v0.5:
+> - **Screening bluechip-only (default)** — kandidat sinyal beli hanya dari emiten
+>   kurasi bluechip (`universe.bluechip_only`); posisi porto non-bluechip tetap terpantau
+> - **MCP TradingView sebagai sumber harga cadangan** (`src/hermes_idx/mcp.py`): bila
+>   TradingView Scanner gagal, harga porto + IHSG diisi via server `tradingview-mcp`
+>   (JSON-RPC langsung, tanpa dependensi mcp, ~2 detik untuk seluruh porto)
+> - **Sinyal beli realtime** — watcher intraday tiap 10 menit jam bursa, langsung
+>   push WA begitu ada sinyal (state file mencegah alert dobel)
+> - **Cek MCP di doctor** — ketersediaan server MCP diverifikasi bila dikonfigurasi
+>
+> Dari v0.4 (tetap ada):
 > - **Harga real-time** via TradingView Scanner API (bukan Yahoo yang stale)
 > - **Backtest otomatis** tiap hari 17:00 WIB (data update → compare → simpan edge)
 > - **Alert SL/TP** tiap 5 menit jam bursa — push notifikasi kalau kena/mendekati
@@ -92,19 +102,22 @@ Laporan pagi punya dua bagian yang sering tertukar. Bedanya penting:
 | **Rezim pasar** | Bullish kalau IHSG di atas rata-rata 200 hari; bearish kalau di bawah. |
 | **Slippage** | Selisih harga yang Anda niatkan dengan yang benar-benar terjadi. |
 
-### Laporan otomatis tiap hari
+### Laporan & monitoring otomatis
 
-Di Android (Termux + Hermes Agent), semua jalan sendiri tanpa buka HP:
+Di VPS (atau HP Termux) dengan Hermes Agent, semua jalan sendiri tanpa disentuh:
 
 ```
-08:45  Laporan Pagi    — porto + rekomendasi + peringkat + saran reposisi + edge
-16:30  Laporan Sore    — review porto saja, tanpa rekomendasi beli
-17:00  Backtest Auto   — data update → compare → simpan edge ke DB (background)
-09-16  Alert SL/TP     — tiap 5 menit, push WA kalau kena/mendekati (1.5%)
+*/10   Sinyal Beli Realtime — 08-16 WIB Sen-Jum, scan intraday; push WA hanya
+                                  kalau ada sinyal baru (state file anti-dobel)
+*/5    Alert SL/TP          — 09-16 WIB Sen-Jum, push kalau kena/mendekati (1.5%)
+17:00  Backtest Auto        — data update → compare → simpan edge ke DB
+08:45  Laporan Pagi         — porto + rekomendasi + peringkat + reposisi (opsional)
+16:30  Laporan Sore         — review porto saja, tanpa rekomendasi beli (opsional)
 ```
 
-Pagi memberi porto + peringkat + saran beli + trailing stop recommendation; sore hanya
-review posisi — supaya tidak memancing transaksi di jam yang salah.
+Laporan pagi/sore bisa dipause bila hanya mau monitoring realtime; sinyal beli dan
+alert SL/TP tetap jalan. Watcher memakai harga intraday TradingView Scanner, dan bila
+sumber itu gagal laporan harian otomatis jatuh ke **MCP TradingView** sebagai cadangan.
 
 Backtest otomatis memastikan edge data selalu fresh: setiap sore setelah bursa tutup,
 sistem update data Yahoo, jalankan compare semua strategi, dan simpan hasilnya ke DB.
