@@ -61,6 +61,10 @@ DEFAULTS: dict[str, Any] = {
         "max_price": 50000,
         "min_listing_days": 250,
         "exclude_boards": ["Pemantauan Khusus"],
+        # Screening HANYA emiten bluechip kurasi (universe.py SECTORS, ~63 emiten).
+        # Posisi porto yang non-bluechip TETAP dipantau SL/TP-nya lewat `posisi`,
+        # hanya tidak pernah muncul sebagai kandidat sinyal beli baru.
+        "bluechip_only": True,
     },
     "exit": {
         "time_stop_days": 20,
@@ -78,6 +82,12 @@ DEFAULTS: dict[str, Any] = {
         "history_years": 5,
         "rate_limit_per_sec": 5.0,
         "stale_after_days": 2,
+    },
+    "mcp": {
+        # Server MCP TradingView — sumber harga cadangan (fallback) untuk laporan
+        # harian bila TradingView Scanner utama gagal. Kosong = fitur mati.
+        "command": "",
+        "timeout": 60,
     },
 }
 

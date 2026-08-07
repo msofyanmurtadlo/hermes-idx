@@ -359,8 +359,17 @@ def data_age_days(conn: sqlite3.Connection) -> int | None:
 # --------------------------------------------------------------------------- universe
 
 def universe(conn: sqlite3.Connection, cfg) -> tuple[list[str], list[str]]:
-    """Filter likuiditas & kelayakan. Kembalikan (daftar_ticker, peringatan)."""
+    """Filter likuiditas & kelayakan. Kembalikan (daftar_ticker, peringatan).
+
+    Bila `universe.bluechip_only` aktif (default), hanya emiten kurasi bluechip
+    (universe.BLUECHIP) yang bisa lolos jadi kandidat sinyal beli. Emiten porto
+    non-bluechip tetap dipantau lewat tabel `posisi` — filter ini hanya membatasi
+    KANDIDAT BARU, bukan pengawasan posisi yang sudah ada."""
+    from .universe import BLUECHIP  # impor lokal: hindari lingkaran saat module load
+
     uni = cfg.data["universe"]
+    bluechip_only = bool(uni.get("bluechip_only", False))
+    allowed = set(BLUECHIP) if bluechip_only else None
     rows = conn.execute(
         """
         WITH terakhir AS (
@@ -394,6 +403,8 @@ def universe(conn: sqlite3.Connection, cfg) -> tuple[list[str], list[str]]:
     tickers, borderline = [], []
     for row in rows:
         if row["ticker"].startswith("^"):
+            continue
+        if allowed is not None and row["ticker"] not in allowed:
             continue
         if row["total_bars"] < uni["min_listing_days"]:
             continue

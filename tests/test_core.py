@@ -744,6 +744,61 @@ def test_value_estimate_uses_typical_price():
                                  "high": None, "low": None}) == 1000.0
 
 
+def _seed_liquid(conn, tickers, days=3):
+    """Isi OHLCV likuid untuk daftar ticker (pola helper test universe)."""
+    rows = []
+    val = 900_000_000_000
+    for tick in tickers:
+        for d in range(days):
+            harga = 1000.0
+            rows.append((tick, f"2026-07-{20 + d}", harga, harga, harga, harga,
+                         int(val / harga), val, 1))
+    conn.executemany(
+        "INSERT INTO ohlcv (ticker,date,open,high,low,close,volume,value,value_is_estimated)"
+        " VALUES (?,?,?,?,?,?,?,?,?)", rows)
+    conn.commit()
+
+
+def test_universe_bluechip_only_blocks_non_bluechip(conn, cfg):
+    """bluechip_only aktif (default): emiten likuid di luar kurasi TIDAK lolos."""
+    from hermes_idx import data as dmod
+    cfg.data["universe"]["min_listing_days"] = 1
+    _seed_liquid(conn, ["BBCA", "BREN"])  # BREN likuid tapi bukan bluechip kurasi
+    tickers, _ = dmod.universe(conn, cfg)
+    assert "BBCA" in tickers
+    assert "BREN" not in tickers, "non-bluechip harus diblokir dari kandidat sinyal"
+
+
+def test_universe_bluechip_off_allows_all(conn, cfg):
+    """bluechip_only dimatikan: semua emiten likuid boleh lolos (perilaku lama)."""
+    from hermes_idx import data as dmod
+    cfg.data["universe"]["min_listing_days"] = 1
+    cfg.data["universe"]["bluechip_only"] = False
+    _seed_liquid(conn, ["BBCA", "BREN"])
+    tickers, _ = dmod.universe(conn, cfg)
+    assert set(tickers) == {"BBCA", "BREN"}
+
+
+# --------------------------------------------------------------------------- MCP
+
+def test_mcp_symbol_mapping():
+    """IHSG punya nama berbeda di scanner (COMPOSITE) vs Yahoo (^JKSE)."""
+    from hermes_idx import mcp as mcpmod
+    assert mcpmod._yahoo_symbol("BBCA") == "BBCA.JK"
+    assert mcpmod._yahoo_symbol("COMPOSITE") == "^JKSE"
+    assert mcpmod._yahoo_symbol("^JKSE") == "^JKSE"
+    assert mcpmod._local_symbol("^JKSE") == "COMPOSITE"
+    assert mcpmod._local_symbol("BBCA.JK") == "BBCA"
+
+
+def test_mcp_fetch_quotes_fails_closed():
+    """Kontrak cadangan: server tak ada / command kosong → dict kosong, BUKAN crash."""
+    from hermes_idx import mcp as mcpmod
+    assert mcpmod.fetch_quotes(["BBCA"], "") == {}
+    assert mcpmod.fetch_quotes([], "/usr/bin/false") == {}
+    assert mcpmod.fetch_quotes(["BBCA"], "/nonexistent/server-xyz", timeout=5) == {}
+
+
 # --------------------------------------------------------------------------- peringkat
 
 def test_plan_advice_fixes_take_profit_below_entry(cfg):

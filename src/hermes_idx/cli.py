@@ -683,6 +683,22 @@ def doctor(home: Optional[Path] = HOME_OPT, as_json: bool = JSON_OPT):
                                   f"{len(universe)} emiten lolos filter"))
         for warning in warnings:
             checks.append(agent.Check("catatan data", True, warning))
+
+        # MCP TradingView (opsional) — cek ketersediaan server kalau dikonfigurasi.
+        mcp_cmd = cfg.get("mcp.command", "")
+        if mcp_cmd:
+            from . import mcp as mcpmod
+            quotes = mcpmod.fetch_quotes(["BBCA"], mcp_cmd, timeout=30)
+            checks.append(agent.Check(
+                "MCP TradingView", bool(quotes),
+                f"harga BBCA via MCP: {quotes['BBCA']['price']:,.0f}" if quotes
+                else "server tidak merespons — pastikan tradingview-mcp terpasang",
+            ))
+        else:
+            checks.append(agent.Check(
+                "MCP TradingView", True,
+                "tidak dikonfigurasi (mcp.command kosong) — harga cadangan mati",
+            ))
     except Exception as exc:  # noqa: BLE001
         checks.append(agent.Check("database", False, str(exc)))
 

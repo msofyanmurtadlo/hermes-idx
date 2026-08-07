@@ -15,7 +15,7 @@ import datetime as dt
 import json
 import subprocess
 
-from . import data as datamod, market, portfolio, screen, universe
+from . import data as datamod, market, mcp, portfolio, screen, universe
 
 URGENCY_ORDER = {"SEGERA": 0, "HARI INI": 1, "AMATI": 2}
 
@@ -99,6 +99,18 @@ def build(conn, cfg, as_of: dt.datetime | None = None) -> dict:
     # TradingView pakai simbol "COMPOSITE" untuk IHSG. Satu request untuk porto + IHSG
     # sekaligus — API-nya batch, dulu dipanggil dua kali tanpa alasan.
     live_all = fetch_live_prices([*live_tickers, "COMPOSITE"])
+
+    # CADANGAN: bila scanner gagal (parsial/total), isi dari MCP TradingView.
+    # Jalur data independen (Yahoo via server MCP), bukan endpoint yang sama.
+    mcp_cmd = cfg.get("mcp.command", "")
+    if mcp_cmd:
+        missing = [t for t in live_tickers if t not in live_all]
+        if "COMPOSITE" not in live_all:
+            missing.append("COMPOSITE")
+        if missing:
+            quotes = mcp.fetch_quotes(missing, mcp_cmd, int(cfg.get("mcp.timeout", 60)))
+            live_all.update(quotes)
+
     all_live = {t: v for t, v in live_all.items() if t != "COMPOSITE"}
     bench_live = {"COMPOSITE": live_all["COMPOSITE"]} if "COMPOSITE" in live_all else {}
     live_bench_price = bench_live.get("COMPOSITE", {}).get("price")
