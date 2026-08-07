@@ -118,7 +118,8 @@ def rank(conn, cfg, top: int = 5, as_of: dt.date | None = None
     avg_values = _avg_values(conn)
     min_score = cfg.data["screening"]["min_score"]
     held = {r["ticker"] for r in conn.execute("SELECT ticker FROM posisi WHERE lot > 0")}
-    slots = int(cfg.data["akun"]["max_open_positions"]) - len(held)
+    max_open = int(cfg.data["akun"]["max_open_positions"])
+    slots = max_open - len(held)
 
     best: dict[str, dict] = {}
     for strategy in strat.get(cfg.data["screening"]["strategies"]):
