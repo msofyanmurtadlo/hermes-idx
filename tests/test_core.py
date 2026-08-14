@@ -207,6 +207,20 @@ def test_build_signal_levels_are_valid_ticks(panel, cfg):
     assert sig.rr_tp1 > 0
 
 
+def test_signal_sl_capped_at_two_percent_all_strategies(panel, cfg):
+    """Aturan user 14 Agu 2026: SL sinyal tidak boleh lebih jauh dari 2% dari entry,
+    di semua strategi — termasuk setelah rounding fraksi tick (regresi TINS 11%)."""
+    for name in strat.REGISTRY:
+        try:
+            sig = signals.build("TEST", panel, strat.REGISTRY[name], len(panel) - 1, cfg, avg_value=5e9)
+        except KeyError:
+            continue  # fixture tidak punya kolom khusus strategi (mis. rsi2 untuk trio)
+        if sig is None:
+            continue
+        pct = (sig.entry_price - sig.stop_loss) / sig.entry_price * 100
+        assert pct <= 2.05, f"{name}: SL {pct:.2f}% > cap 2%"
+
+
 def test_signal_risk_matches_rounded_levels(panel, cfg):
     sig = signals.build("TEST", panel, strat.Breakout(), len(panel) - 1, cfg, avg_value=5e9)
     if sig is None:
@@ -483,15 +497,16 @@ def test_daily_warns_when_no_proven_strategy(conn, cfg, monkeypatch):
     assert any("TIDAK ADA strategi" in w for w in report["peringatan"])
 
 
-def test_v3_stop_uses_atr_not_fixed_two_percent(ohlc):
-    """Regresi bug v3: stop tidak boleh selalu persis 2%."""
+def test_v3_stop_capped_at_two_percent(ohlc):
+    """Aturan user 14 Agu 2026 (\"SL maksimal 2 persen, TP boleh banyak\"): SL tidak boleh
+    lebih jauh dari 2% dari entry walau ATR lebar (sebelumnya bisa 11%+ untuk saham volatile)."""
     s = strat.REGISTRY["v3score"]
     frame = s.prepare(ohlc, strat.MarketContext())
     widths = []
     for i in range(250, len(frame), 10):
         entry = float(frame["close"].iloc[i])
         widths.append((entry - s.levels(frame, i, entry).stop_loss) / entry * 100)
-    assert max(widths) > 2.05, "stop masih terpaku 2% — bug v3 kembali"
+    assert max(widths) <= 2.05, f"SL melebihi cap 2%: {max(widths):.2f}%"
 
 
 def test_trio_needs_all_three_indicators(ohlc):

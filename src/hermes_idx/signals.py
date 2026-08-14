@@ -185,6 +185,9 @@ def build(
     entry_mode = TICK_POLICY["entry_stop" if levels.entry_type == "buy_stop" else "entry_limit"]
     entry = market.round_to_tick(close, date, entry_mode)
     stop = market.round_to_tick(levels.stop_loss, date, TICK_POLICY["stop_loss"])
+    # Aturan user 14 Agu 2026 ("SL maksimal 2%") — rounding "down" bisa menambah 1 tick lagi,
+    # jadi clamp ulang ke level 2% yang di-round UP (mendekati entry) supaya jarak tidak tembus.
+    stop = max(stop, market.round_to_tick(entry * (1 - strat.MAX_SL_PCT), date, "up"))
     if stop >= entry:
         return None
 

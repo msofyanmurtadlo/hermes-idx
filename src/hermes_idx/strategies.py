@@ -109,6 +109,17 @@ def _atr_stop(df: pd.DataFrame, i: int, entry: float, mult: float) -> float:
     return entry - mult * float(atr_value)
 
 
+# SL MAKSIMAL 2% dari entry (aturan user, 14 Agu 2026: "SL maksimal 2 persen, TP boleh banyak").
+# Sebelumnya ATR bisa kasih SL sampai 11%+ untuk saham volatile (TINS). Kini SL di-clamp
+# supaya kerugian per posisi tidak pernah lebih jauh dari 2% — TP tetap bebas besar.
+MAX_SL_PCT = 0.02
+
+
+def _clamp_sl(stop: float, entry: float) -> float:
+    """SL tidak boleh lebih jauh dari MAX_SL_PCT dari entry (max() = pilih yang lebih rapat)."""
+    return max(stop, entry * (1 - MAX_SL_PCT))
+
+
 # --------------------------------------------------------------------------- S1
 
 @dataclass
@@ -144,6 +155,7 @@ class Breakout:
         # "pilih yang lebih dekat" = stop yang lebih tinggi (risiko lebih kecil).
         stop = max(by_atr, float(swing)) if np.isfinite(swing) else by_atr
         stop = min(stop, entry * 0.995)
+        stop = _clamp_sl(stop, entry)
         risk = entry - stop
         return Levels(stop, entry + 2 * risk, entry + 4 * risk)
 
@@ -192,6 +204,7 @@ class Pullback:
         low = float(df["low"].iloc[i])
         stop = low - 0.5 * float(atr_value) if np.isfinite(atr_value) else low * 0.97
         stop = min(stop, entry * 0.995)
+        stop = _clamp_sl(stop, entry)
         risk = entry - stop
         prior_high = float(ind.highest(df["high"], 20).iloc[i])
         tp2 = max(prior_high, entry + 3 * risk)
@@ -235,6 +248,7 @@ class MomentumRS:
 
     def levels(self, df: pd.DataFrame, i: int, entry: float) -> Levels:
         stop = min(_atr_stop(df, i, entry, 2.5), entry * 0.995)
+        stop = _clamp_sl(stop, entry)
         risk = entry - stop
         return Levels(stop, entry + 2 * risk, entry + 4 * risk)
 
@@ -299,6 +313,7 @@ class MeanReversion:
         tidak. Menaikkannya lagi (ATR×4 = 62.4%) hanya menggeser angka yang sama.
         """
         stop = min(_atr_stop(df, i, entry, self.atr_mult), entry * 0.995)
+        stop = _clamp_sl(stop, entry)
         risk = entry - stop
         return Levels(stop, entry + 0.8 * risk, entry + self.tp_r * risk, 0.7, 0.3)
 
@@ -391,7 +406,10 @@ class V3Score:
         return ((df["close"] < df["ma20"]) & (df["ma20"] < df["ma50"])).fillna(False)
 
     def levels(self, df: pd.DataFrame, i: int, entry: float) -> Levels:
-        """Stop berbasis ATR, dengan 2% sebagai lebar MINIMUM.
+        """Stop berbasis ATR, di-clamp maksimal 2% dari entry (aturan user 14 Agu 2026).
+
+        Sebelumnya 2% adalah lebar MINIMUM dan ATR bisa memberi stop sampai 11%+ untuk
+        saham volatile (kasus TINS). Kini MAX_SL_PCT membatasi jarak stop; TP tetap bebas.
 
         BUG YANG DIPERBAIKI dari v3 asli. Kode aslinya:
 
@@ -411,6 +429,7 @@ class V3Score:
         atr_value = df["atr14"].iloc[i]
         atr_value = float(atr_value) if np.isfinite(atr_value) else entry * 0.02
         stop = min(entry - self.atr_mult * atr_value, entry * 0.98, entry * 0.995)
+        stop = _clamp_sl(stop, entry)
         risk = entry - stop
         target = max(entry + 2.5 * atr_value, entry * 1.03, entry + 2 * risk)
         # v3 hanya punya satu target. Backtest keluar di tp2, jadi target v3 dipetakan
@@ -523,6 +542,7 @@ class Trio:
         tapi BELUM terbukti secara statistik. Butuh lebih banyak trade.
         """
         stop = min(_atr_stop(df, i, entry, self.atr_mult), entry * 0.995)
+        stop = _clamp_sl(stop, entry)
         risk = entry - stop
         return Levels(stop, entry + risk, entry + self.tp_r * risk, 0.5, 0.5)
 
