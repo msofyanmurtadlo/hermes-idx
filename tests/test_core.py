@@ -221,6 +221,20 @@ def test_signal_sl_capped_at_two_percent_all_strategies(panel, cfg):
         assert pct <= 2.05, f"{name}: SL {pct:.2f}% > cap 2%"
 
 
+def test_signal_rr_tp1_is_1_2_all_strategies(panel, cfg):
+    """Aturan user 14 Agu 2026: R:R TP1 harus 1:2 (TP1 = 2×risiko) di semua strategi."""
+    for name in strat.REGISTRY:
+        try:
+            sig = signals.build("TEST", panel, strat.REGISTRY[name], len(panel) - 1, cfg, avg_value=5e9)
+        except KeyError:
+            continue  # fixture tidak punya kolom khusus strategi (mis. rsi2 untuk trio)
+        if sig is None:
+            continue
+        risk = sig.entry_price - sig.stop_loss
+        rr = (sig.tp1 - sig.entry_price) / risk
+        assert abs(rr - 2.0) < 0.05, f"{name}: R:R TP1 = {rr:.2f}, harus ~2.0"
+
+
 def test_signal_risk_matches_rounded_levels(panel, cfg):
     sig = signals.build("TEST", panel, strat.Breakout(), len(panel) - 1, cfg, avg_value=5e9)
     if sig is None:

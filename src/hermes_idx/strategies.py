@@ -150,12 +150,8 @@ class Breakout:
         return (df["close"] < df["ema20"]).fillna(False)
 
     def levels(self, df: pd.DataFrame, i: int, entry: float) -> Levels:
-        by_atr = _atr_stop(df, i, entry, 2.0)
-        swing = df["swing_low"].iloc[i]
-        # "pilih yang lebih dekat" = stop yang lebih tinggi (risiko lebih kecil).
-        stop = max(by_atr, float(swing)) if np.isfinite(swing) else by_atr
-        stop = min(stop, entry * 0.995)
-        stop = _clamp_sl(stop, entry)
+        # Level FIX (aturan user 14 Agu 2026): SL -2%, TP1 +4% (R:R 1:2), TP2 +8% (R:R 1:4)
+        stop = entry * (1 - MAX_SL_PCT)
         risk = entry - stop
         return Levels(stop, entry + 2 * risk, entry + 4 * risk)
 
@@ -200,15 +196,10 @@ class Pullback:
         return ((df["close"] < df["ema50"]) | (df["rsi14"] > 80)).fillna(False)
 
     def levels(self, df: pd.DataFrame, i: int, entry: float) -> Levels:
-        atr_value = df["atr14"].iloc[i]
-        low = float(df["low"].iloc[i])
-        stop = low - 0.5 * float(atr_value) if np.isfinite(atr_value) else low * 0.97
-        stop = min(stop, entry * 0.995)
-        stop = _clamp_sl(stop, entry)
+        # Level FIX (aturan user 14 Agu 2026): SL -2%, TP1 +4% (R:R 1:2), TP2 +8% (R:R 1:4)
+        stop = entry * (1 - MAX_SL_PCT)
         risk = entry - stop
-        prior_high = float(ind.highest(df["high"], 20).iloc[i])
-        tp2 = max(prior_high, entry + 3 * risk)
-        return Levels(stop, entry + 1.5 * risk, tp2)
+        return Levels(stop, entry + 2 * risk, entry + 4 * risk)
 
     def reason(self, df: pd.DataFrame, i: int) -> str:
         row = df.iloc[i]
@@ -247,8 +238,8 @@ class MomentumRS:
         return (df["close"] < df["chandelier"]).fillna(False)
 
     def levels(self, df: pd.DataFrame, i: int, entry: float) -> Levels:
-        stop = min(_atr_stop(df, i, entry, 2.5), entry * 0.995)
-        stop = _clamp_sl(stop, entry)
+        # Level FIX (aturan user 14 Agu 2026): SL -2%, TP1 +4% (R:R 1:2), TP2 +8% (R:R 1:4)
+        stop = entry * (1 - MAX_SL_PCT)
         risk = entry - stop
         return Levels(stop, entry + 2 * risk, entry + 4 * risk)
 
@@ -312,10 +303,10 @@ class MeanReversion:
         daripada menangnya, jadi akun tetap menyusut. Win rate 60% tercapai; profit
         tidak. Menaikkannya lagi (ATR×4 = 62.4%) hanya menggeser angka yang sama.
         """
-        stop = min(_atr_stop(df, i, entry, self.atr_mult), entry * 0.995)
-        stop = _clamp_sl(stop, entry)
+        stop = entry * (1 - MAX_SL_PCT)
         risk = entry - stop
-        return Levels(stop, entry + 0.8 * risk, entry + self.tp_r * risk, 0.7, 0.3)
+        # Level FIX (aturan user 14 Agu 2026): SL -2%, TP1 +4% (R:R 1:2), TP2 +8% (R:R 1:4)
+        return Levels(stop, entry + 2 * risk, entry + 4 * risk, 0.7, 0.3)
 
     def reason(self, df: pd.DataFrame, i: int) -> str:
         row = df.iloc[i]
@@ -406,10 +397,10 @@ class V3Score:
         return ((df["close"] < df["ma20"]) & (df["ma20"] < df["ma50"])).fillna(False)
 
     def levels(self, df: pd.DataFrame, i: int, entry: float) -> Levels:
-        """Stop berbasis ATR, di-clamp maksimal 2% dari entry (aturan user 14 Agu 2026).
+        """Level FIX (aturan user 14 Agu 2026): SL -2%, TP1 +4% (R:R 1:2), TP2 +8% (R:R 1:4).
 
         Sebelumnya 2% adalah lebar MINIMUM dan ATR bisa memberi stop sampai 11%+ untuk
-        saham volatile (kasus TINS). Kini MAX_SL_PCT membatasi jarak stop; TP tetap bebas.
+        saham volatile (kasus TINS), dan target ikut ATR (R:R tidak konsisten).
 
         BUG YANG DIPERBAIKI dari v3 asli. Kode aslinya:
 
@@ -426,12 +417,10 @@ class V3Score:
         memberi expectancy -0.765R. Dengan `min()` (ATR yang memimpin, 2% jadi lantai)
         angkanya membaik ke -0.100R — masih negatif, tapi bedanya 7×.
         """
-        atr_value = df["atr14"].iloc[i]
-        atr_value = float(atr_value) if np.isfinite(atr_value) else entry * 0.02
-        stop = min(entry - self.atr_mult * atr_value, entry * 0.98, entry * 0.995)
-        stop = _clamp_sl(stop, entry)
+        stop = entry * (1 - MAX_SL_PCT)
         risk = entry - stop
-        target = max(entry + 2.5 * atr_value, entry * 1.03, entry + 2 * risk)
+        # Level FIX (aturan user 14 Agu 2026): SL -2%, TP1 +4% (R:R 1:2), TP2 +8% (R:R 1:4)
+        target = entry + 4 * risk
         # v3 hanya punya satu target. Backtest keluar di tp2, jadi target v3 dipetakan
         # ke tp2 agar simulasinya setia pada perilaku aslinya.
         return Levels(stop, entry + (target - entry) / 2, target, 0.5, 0.5)
@@ -541,10 +530,10 @@ class Trio:
         kemungkinan hasil sebagus ini muncul dari keberuntungan belaka. Positif,
         tapi BELUM terbukti secara statistik. Butuh lebih banyak trade.
         """
-        stop = min(_atr_stop(df, i, entry, self.atr_mult), entry * 0.995)
-        stop = _clamp_sl(stop, entry)
+        stop = entry * (1 - MAX_SL_PCT)
         risk = entry - stop
-        return Levels(stop, entry + risk, entry + self.tp_r * risk, 0.5, 0.5)
+        # Level FIX (aturan user 14 Agu 2026): SL -2%, TP1 +4% (R:R 1:2), TP2 +8% (R:R 1:4)
+        return Levels(stop, entry + 2 * risk, entry + 4 * risk, 0.5, 0.5)
 
     def reason(self, df: pd.DataFrame, i: int) -> str:
         row = df.iloc[i]

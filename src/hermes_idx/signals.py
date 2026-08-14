@@ -192,8 +192,11 @@ def build(
         return None
 
     risk = entry - stop
-    tp1 = market.round_to_tick(levels.tp1, date, TICK_POLICY["take_profit"])
-    tp2 = market.round_to_tick(levels.tp2, date, TICK_POLICY["take_profit"])
+    # Level FIX (aturan user 14 Agu 2026): TP dihitung dari RISK FINAL supaya R:R persis
+    # 1:2 (TP1 = 2×risk) dan 1:4 (TP2 = 4×risk) — bukan dari levels.tp1 yang bisa melenceng
+    # akibat pembulatan fraksi harga terpisah.
+    tp1 = market.round_to_tick(entry + 2 * risk, date, TICK_POLICY["take_profit"])
+    tp2 = market.round_to_tick(entry + 4 * risk, date, TICK_POLICY["take_profit"])
     if tp1 <= entry or tp2 <= tp1:
         return None
 
