@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from . import market, strategies as strat
+from . import market, strategies as strat, indicators as ind
 
 
 @dataclass
@@ -60,6 +60,10 @@ def simulate(
     partial: bool = True,
     breakeven_at_r: float = 0.0,
     max_holding_days: int = 0,
+    trailing_method: str = "chandelier",
+    trailing_mult: float = 2.5,
+    tp1_size: float = 0.5,
+    tp2_size: float = 0.5,
 ) -> tuple[list[Trade], int]:
     """Simulasi satu emiten. Satu posisi pada satu waktu.
 
@@ -125,10 +129,17 @@ def simulate(
         # >= 2 lot (IDX tidak mengenal pecahan lot). Untuk modal kecil dengan stop lebar,
         # `lots` bisa jatuh ke 1 dan rencana ini otomatis kembali ke exit tunggal.
         tp1 = market.round_to_tick(levels.tp1, dates[exec_i], "down")
-        lots_tp1 = int(lots * levels.tp1_size) if partial else 0
+        tp1_size = levels.tp1_size
+        tp2_size = levels.tp2_size
+        lots_tp1 = int(lots * tp1_size) if partial else 0
         if not (entry < tp1 < tp2) or lots_tp1 <= 0 or lots_tp1 >= lots:
             lots_tp1 = 0
         be_trigger = entry + breakeven_at_r * risk if breakeven_at_r else np.inf
+
+        # Chandelier trailing: highest(high, n) - k * ATR(n)
+        chandelier_n = 22  # standard Chandelier period
+        chandelier_k = trailing_mult
+        chandelier_series = ind.chandelier_exit(df, chandelier_n, chandelier_k)
 
         exit_i, exit_price, reason = None, None, ""
         peak_high = -np.inf  # tertinggi sejak entry — dipakai time stop di bawah
@@ -184,6 +195,14 @@ def simulate(
             ):
                 exit_i, exit_price, reason = None, None, ""
                 continue
+            # Chandelier trailing stop
+            if trailing_method == "chandelier" and not np.isnan(chandelier_series.iloc[j]):
+                chandelier_stop = market.round_to_tick(float(chandelier_series.iloc[j]), dates[exec_i], "down")
+                if chandelier_stop > stop:
+                    stop = chandelier_stop
+                    # Update reason if trailing stop was triggered
+                    if exit_i is not None and reason == "TIME_STOP":
+                        reason = "TRAIL_STOP"
             break
 
         if exit_i is None:
@@ -319,12 +338,20 @@ def rolling_oos(
     all_trades: list[Trade] = []
     unfilled = 0
     exit_cfg = cfg.data["exit"]
+    trailing_method = exit_cfg.get("trailing_method", "chandelier")
+    trailing_mult = exit_cfg.get("trailing_multiplier", 2.5)
+    tp1_size = exit_cfg.get("tp1_size", 0.5)
+    tp2_size = exit_cfg.get("tp2_size", 0.5)
     for ticker, frame in panel.items():
         trades, miss = simulate(ticker, frame, strategy, cfg,
                                 exit_cfg["time_stop_days"],
                                 partial=exit_cfg.get("partial_tp1", True),
                                 breakeven_at_r=exit_cfg.get("breakeven_at_r", 0.0) or 0.0,
-                                max_holding_days=exit_cfg.get("max_holding_days", 0) or 0)
+                                max_holding_days=exit_cfg.get("max_holding_days", 0) or 0,
+                                trailing_method=trailing_method,
+                                trailing_mult=trailing_mult,
+                                tp1_size=tp1_size,
+                                tp2_size=tp2_size)
         all_trades.extend(trades)
         unfilled += miss
 
